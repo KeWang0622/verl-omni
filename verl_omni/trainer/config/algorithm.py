@@ -41,6 +41,7 @@ class DiffusionAlgoConfig(BaseConfig):
     train_timestep_range: Optional[list[int]] = None
     train_timestep_count: Optional[int] = None
     adv_mode: str = "continuous"
+    art_pairwise_reward: bool = False
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 

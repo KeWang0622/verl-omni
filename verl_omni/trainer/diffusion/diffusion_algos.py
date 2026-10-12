@@ -13,6 +13,7 @@
 # limitations under the License.
 """Diffusion-specific loss functions and KL penalties."""
 
+import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from dataclasses import dataclass
@@ -27,7 +28,10 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
+from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss, art_pairwise_labels
 from verl_omni.workers.config import DiffusionActorConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1333,6 +1337,211 @@ class DGPOLoss(DiffusionLossFn):
         batch.batch["advantages"] = advantages[:, None].expand(-1, num_steps)
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_steps)
+        return batch
+
+
+@register_diffusion_loss("diffusion_art")
+class DiffusionARTLoss(DiffusionLossFn):
+    """DiffusionART: aggregation-first reward tilting (Wan et al., arXiv:2610.12572).
+
+    Per prompt, the rewards and clean endpoints of its ``n`` ODE rollouts are aggregated into one
+    unit-RMS guidance direction ``G(c)`` (the reward-endpoint covariance, ``art_guidance``). Every
+    ODE state ``s_t`` the rollouts visited then regresses the current velocity toward the frozen
+    target ``v_old(s_t) - G(c)`` (``v = noise - x0`` convention; the paper writes ``v_old + G``)
+    with weight ``t``, and a trust-region mask drops items whose drift from ``v_old`` is both large
+    and outward (``art_loss``). Splitting each rollout batch into two optimizer steps
+    (``ppo_mini_batch_size = data.train_batch_size / 2``) gives the paper's second, drift-restoring
+    update: the second mini batch sees ``v_theta`` after the first step while its target still comes
+    from ``v_old``. There are no likelihoods, no differentiable reward, no EMA and no KL term.
+    """
+
+    uses_old_adapter = True
+    required_model_output_keys = ("forward_prediction", "old_prediction", "t_expanded")
+    required_data_keys = ("art_guidance", "sigma_next")
+
+    @classmethod
+    def compute_loss(
+        cls,
+        *,
+        forward_prediction: torch.Tensor,
+        old_prediction: torch.Tensor,
+        t_expanded: torch.Tensor,
+        art_guidance: torch.Tensor,
+        sigma_next: torch.Tensor,
+        config: DiffusionActorConfig,
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Masked frozen-target MSE averaged over the micro batch (paper Algorithm 1, step 5).
+
+        Masked and inactive items contribute zero but stay in the denominator, as in the paper's
+        ``1/|B|`` average.
+        """
+        loss_cfg = config.diffusion_loss
+        sigma = t_expanded.reshape(t_expanded.shape[0], -1)[:, 0]
+        terms = art_loss(
+            forward_prediction,
+            old_prediction,
+            art_guidance,
+            sigma,
+            sigma_next,
+            guidance_gain=loss_cfg.art_guidance_gain,
+            loss_space=loss_cfg.art_loss_space,
+            mask_metric=loss_cfg.art_mask_metric,
+            mask_threshold=loss_cfg.art_mask_threshold,
+            reference_noise_level=loss_cfg.art_reference_noise_level,
+            corrective_mask_enabled=loss_cfg.art_corrective_mask_enabled,
+        )
+        loss = terms["per_item_loss"].mean()
+        with torch.no_grad():
+            active = terms["active"]
+            num_active = active.sum().clamp_min(1).float()
+            metrics = {
+                "actor/policy_loss": loss.detach().item(),
+                "actor/unmasked_loss": ((terms["per_item_mse"] * active).sum() / num_active).item(),
+                "actor/active_frac": active.float().mean().item(),
+                # Fractions are over active items so that batches of constant-reward prompts stay interpretable.
+                "actor/mask_frac": (terms["masked"].float().sum() / num_active).item(),
+                "actor/outward_frac": (((terms["outward_alignment"] > 0) & active).float().sum() / num_active).item(),
+                "actor/old_deviate": terms["movement_energy"].mean().item(),
+                "actor/movement_score": terms["movement_score"].mean().item(),
+                "actor/guidance_rms": art_guidance.float().flatten(1).square().mean(dim=1).sqrt().mean().item(),
+                "actor/total_loss": loss.detach().item(),
+            }
+        return loss, metrics
+
+    def __call__(
+        self,
+        *,
+        config: DiffusionActorConfig,
+        model_output: dict[str, Any],
+        data: TensorDict,
+    ) -> DiffusionLossResult:
+        self.validate_inputs(loss_name="diffusion_art", model_output=model_output, data=data)
+        loss, metrics = self.compute_loss(
+            forward_prediction=model_output["forward_prediction"],
+            old_prediction=model_output["old_prediction"],
+            t_expanded=model_output["t_expanded"],
+            art_guidance=data["art_guidance"],
+            sigma_next=data["sigma_next"],
+            config=config,
+        )
+        return DiffusionLossResult(loss=loss, metrics=metrics)
+
+    @staticmethod
+    def validate_trainer_config(config: Any) -> None:
+        """Fail at trainer start on settings DiffusionART cannot honour.
+
+        The loss regresses against the LoRA ``old`` adapter at cached ODE states, so it needs LoRA
+        training, the ``old`` rollout adapter, a deterministic rollout and the unstaged engine path.
+        The paper's two-update restoration follows from ``ppo_mini_batch_size`` splitting the rollout
+        batch in two; any other split only logs a warning so ablations stay possible.
+        """
+        DiffusionLossFn.validate_trainer_config(config)
+        actor_cfg = config.actor_rollout_ref.actor
+        model_cfg = config.actor_rollout_ref.model
+        rollout_cfg = config.actor_rollout_ref.rollout
+        problems = []
+        if not int(model_cfg.get("lora_rank", 0) or 0) > 0:
+            problems.append("actor_rollout_ref.model.lora_rank must be > 0 (DiffusionART trains LoRA adapters)")
+        if "old" not in tuple(model_cfg.get("policy_state_adapters", ("default",))):
+            problems.append('actor_rollout_ref.model.policy_state_adapters must include "old"')
+        if rollout_cfg.get("rollout_adapter", None) != "old":
+            problems.append("actor_rollout_ref.rollout.rollout_adapter must be old")
+        noise_level = OmegaConf.select(rollout_cfg, "algo.noise_level", default=None)
+        if noise_level is not None and float(noise_level) != 0.0:
+            problems.append("actor_rollout_ref.rollout.algo.noise_level must be 0.0 (DiffusionART rolls out an ODE)")
+        if actor_cfg.get("use_kl_loss", False):
+            problems.append("actor_rollout_ref.actor.use_kl_loss must be False (DiffusionART has no KL term)")
+        if actor_cfg.get("enable_timestep_staging", False):
+            problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if problems:
+            raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
+
+        update_prompts = int(config.data.train_batch_size)
+        if bool(OmegaConf.select(config, "trainer.use_v1", default=False)):
+            mode = OmegaConf.select(config, "trainer.v1.trainer_mode", default="sync")
+            update_prompts //= int(OmegaConf.select(config, f"trainer.v1.{mode}.parameter_sync_step", default=1) or 1)
+        mini = int(actor_cfg.ppo_mini_batch_size)
+        if update_prompts != 2 * mini:
+            logger.warning(
+                "DiffusionART (paper Sec. 4.2) applies two disjoint updates per rollout batch, i.e. "
+                "ppo_mini_batch_size = prompts per update / 2; got ppo_mini_batch_size=%d for %d prompts.",
+                mini,
+                update_prompts,
+            )
+
+    @staticmethod
+    def prepare_actor_batch(
+        batch: DataProto,
+        reward_tensor: torch.Tensor,
+        config: Any,
+    ) -> DataProto:
+        """Turn ODE rollouts into DiffusionART actor tensors: cached states, schedule and per-prompt guidance.
+
+        Requires the full trajectory from the ``diffusion_art`` rollout adapter: ``all_latents``
+        ``(B, T + 1, *latent)`` whose last entry is the clean endpoint and ``all_timesteps`` ``(B, T)``.
+        Writes ``train_latents`` ``(B, S, *latent)``, ``train_timesteps`` / ``train_timesteps_next``
+        ``(B, S)`` (``S = T * algorithm.timestep_fraction`` states per rollout), ``art_guidance``
+        ``(B, *latent)`` shared by all rows of a prompt, plus the usual ``advantages`` / ``returns`` /
+        ``sample_level_rewards`` for logging. ``all_latents`` is dropped afterwards so the worker batch
+        stays as small as DiffusionNFT's.
+        """
+        algorithm_cfg = config.algorithm
+        actor_cfg = config.actor_rollout_ref.actor
+        if "uid" not in batch.non_tensor_batch:
+            raise ValueError("DiffusionART actor batch requires `uid` in non_tensor_batch.")
+        for key in ("all_latents", "all_timesteps"):
+            if key not in batch.batch.keys():
+                raise ValueError(f"DiffusionART actor batch requires `{key}` from the diffusion_art rollout adapter.")
+        all_latents = batch.batch["all_latents"]
+        all_timesteps = batch.batch["all_timesteps"]
+        batch_size, num_steps = all_timesteps.shape
+        if all_latents.ndim < 3 or all_latents.shape[:2] != (batch_size, num_steps + 1):
+            raise ValueError(
+                "DiffusionART needs the full ODE trajectory: `all_latents` must have shape (B, T + 1, ...) for "
+                f"`all_timesteps` of shape (B, T); got {tuple(all_latents.shape)} and {tuple(all_timesteps.shape)}."
+            )
+
+        uid = batch.non_tensor_batch["uid"]
+        group_index = torch.from_numpy(DGPOLoss._first_appearance_index(uid)).long()
+        num_groups = int(group_index.max().item()) + 1
+        endpoints = all_latents[:, -1].float()
+        rewards = reward_tensor.detach().float().cpu()
+        if algorithm_cfg.get("art_pairwise_reward", False):
+            seed = int(actor_cfg.data_loader_seed) + int(batch.meta_info.get("global_steps", 0))
+            rewards = art_pairwise_labels(rewards, group_index, num_groups, torch.Generator().manual_seed(seed))
+        guidance, active = art_guidance(endpoints, rewards, group_index, num_groups)
+        if not bool(active.any()):
+            logger.warning(
+                "DiffusionART: every prompt group in this batch has constant rewards; the update is a no-op."
+            )
+
+        step_index = DiffusionNFTLoss._select_train_timesteps(
+            torch.arange(num_steps).expand(batch_size, -1),
+            timestep_fraction=algorithm_cfg.timestep_fraction,
+            seed=actor_cfg.data_loader_seed,
+        )
+        num_train = step_index.shape[1]
+        next_timesteps = torch.cat([all_timesteps[:, 1:], torch.zeros_like(all_timesteps[:, :1])], dim=1)
+        latent_index = step_index.view(batch_size, num_train, *([1] * (all_latents.ndim - 2)))
+        train_latents = all_latents.gather(1, latent_index.expand(-1, -1, *all_latents.shape[2:]))
+
+        advantages = DiffusionNFTLoss._compute_group_advantages(
+            rewards=reward_tensor,
+            uid=uid,
+            norm_by_std=algorithm_cfg.norm_adv_by_std_in_grpo,
+            global_std=algorithm_cfg.global_std,
+        )
+        batch.batch["train_latents"] = train_latents
+        batch.batch["train_timesteps"] = all_timesteps.gather(1, step_index)
+        batch.batch["train_timesteps_next"] = next_timesteps.gather(1, step_index)
+        batch.batch["art_guidance"] = guidance[group_index]
+        batch.batch["latents_clean"] = endpoints
+        batch.batch["advantages"] = advantages[:, None].expand(-1, num_train)
+        batch.batch["returns"] = batch.batch["advantages"]
+        batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_train)
+        for key in ("all_latents", "all_log_probs"):
+            if key in batch.batch.keys():
+                del batch.batch[key]
         return batch
 
 
