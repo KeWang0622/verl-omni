@@ -28,7 +28,7 @@ from tensordict import TensorDict
 from verl import DataProto
 from verl.utils import tensordict_utils as tu
 
-from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss, art_pairwise_labels
+from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss, art_pairwise_labels, group_index_from_uid
 from verl_omni.workers.config import DiffusionActorConfig
 
 logger = logging.getLogger(__name__)
@@ -1691,8 +1691,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         segments = cls._segments(endpoints.shape[1], batch.batch.get("video_seq_len", None))
 
         uid = batch.non_tensor_batch["uid"]
-        group_index = torch.from_numpy(DGPOLoss._first_appearance_index(uid)).long()
-        num_groups = int(group_index.max().item()) + 1
+        group_index, num_groups = group_index_from_uid(uid)
         modality_rewards = cls._modality_rewards(batch, reward_tensor, config, [name for name, _ in segments])
         pairwise = bool(algorithm_cfg.get("art_pairwise_reward", False))
         pair_seed = int(actor_cfg.data_loader_seed) + int(batch.meta_info.get("global_steps", 0))

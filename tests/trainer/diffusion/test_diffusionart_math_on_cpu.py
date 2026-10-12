@@ -239,3 +239,13 @@ def test_loss_validates_options_and_shapes():
     with pytest.raises(ValueError, match="one value per item"):
         art_loss(old, old, guidance, sigma[:2], sigma_next)
     assert math.isfinite(art_loss(old, old, guidance, sigma, sigma_next)["per_item_loss"].sum().item())
+
+
+def test_group_index_from_uid_numbers_prompts_by_first_appearance():
+    import numpy as np
+
+    from verl_omni.trainer.diffusion.diffusion_art import group_index_from_uid
+
+    group_index, num_groups = group_index_from_uid(np.array(["b", "a", "b", "c", "a"], dtype=object))
+    assert group_index.tolist() == [0, 1, 0, 2, 1] and num_groups == 3
+    assert group_index.dtype == torch.int64

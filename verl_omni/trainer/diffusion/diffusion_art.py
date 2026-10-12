@@ -25,6 +25,7 @@ Velocity convention: verl-omni's flow-matching adapters predict ``v = noise - x0
 convention-free because it only involves differences of velocities.
 """
 
+import numpy as np
 import torch
 
 __all__ = [
@@ -34,10 +35,24 @@ __all__ = [
     "art_loss",
     "art_pairwise_labels",
     "art_reference_drift",
+    "group_index_from_uid",
 ]
 
 ART_LOSS_SPACES = ("velocity_linear_sigma", "velocity_uniform")
 ART_MASK_METRICS = ("sde_kl", "fixed_mse")
+
+
+def group_index_from_uid(uid: np.ndarray) -> tuple[torch.Tensor, int]:
+    """Number prompts ``0, 1, ...`` in order of first appearance of their ``uid``.
+
+    Returns:
+        ``(group_index, num_groups)`` with ``group_index`` an int64 tensor of shape ``(B,)``.
+    """
+    _, first, inverse = np.unique(np.asarray(uid), return_index=True, return_inverse=True)
+    rank = np.empty_like(first)
+    rank[np.argsort(first, kind="stable")] = np.arange(first.size)
+    group_index = torch.from_numpy(rank[inverse.reshape(-1)].astype(np.int64))
+    return group_index, int(first.size)
 
 
 @torch.no_grad()
