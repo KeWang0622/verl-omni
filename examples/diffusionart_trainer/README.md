@@ -49,7 +49,7 @@ This produces `$WORKSPACE/data/ocr/train.parquet` and `$WORKSPACE/data/ocr/test.
 WORKSPACE=/path/to/workspace bash examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh
 ```
 
-[`qwen_image/run_qwen_image_ocr_lora.sh`](qwen_image/run_qwen_image_ocr_lora.sh)
+[`qwen_image/run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 mirrors the DiffusionNFT Qwen-Image OCR recipe (data, reward, LoRA targets,
 512x512, 10 rollout steps, 16 samples per prompt, lr `3e-4`) and changes only the
 algorithm dispatch and the DiffusionART knobs:
