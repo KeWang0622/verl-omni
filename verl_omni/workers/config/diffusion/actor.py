@@ -46,6 +46,14 @@ class DiffusionLossConfig(BaseConfig):
     dpo_beta: float = 2000.0
     kl_mask_threshold: float = 1e-5
     add_kl_coefficient: bool = True
+    art_guidance_gain: float = 1.0
+    art_loss_space: str = "velocity_linear_sigma"
+    art_mask_metric: str = "sde_kl"
+    art_mask_threshold: float = 1e-5
+    art_reference_noise_level: float = 0.8
+    art_corrective_mask_enabled: bool = True
+    art_video_weight: float = 1.0
+    art_audio_weight: float = 1.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -55,6 +63,7 @@ class DiffusionLossConfig(BaseConfig):
             "grpo_guard",
             "diffusion_nft",
             "omni_nft",
+            "diffusion_art",
             "dpo",
             "dmd2",
             "dance_grpo",
@@ -71,6 +80,23 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"adaptive_weight_min must be positive, got {self.adaptive_weight_min}.")
         if self.kl_mask_threshold <= 0:
             raise ValueError(f"kl_mask_threshold must be positive, got {self.kl_mask_threshold}.")
+        from verl_omni.trainer.diffusion.diffusion_art import ART_LOSS_SPACES, ART_MASK_METRICS
+
+        if self.art_guidance_gain <= 0:
+            raise ValueError(f"art_guidance_gain must be positive, got {self.art_guidance_gain}.")
+        if self.art_loss_space not in ART_LOSS_SPACES:
+            raise ValueError(f"art_loss_space must be one of {list(ART_LOSS_SPACES)}, got {self.art_loss_space!r}.")
+        if self.art_mask_metric not in ART_MASK_METRICS:
+            raise ValueError(f"art_mask_metric must be one of {list(ART_MASK_METRICS)}, got {self.art_mask_metric!r}.")
+        if self.art_mask_threshold <= 0:
+            raise ValueError(f"art_mask_threshold must be positive, got {self.art_mask_threshold}.")
+        if self.art_reference_noise_level <= 0:
+            raise ValueError(f"art_reference_noise_level must be positive, got {self.art_reference_noise_level}.")
+        if self.art_video_weight < 0 or self.art_audio_weight < 0 or self.art_video_weight + self.art_audio_weight <= 0:
+            raise ValueError(
+                "art_video_weight and art_audio_weight must be non-negative with a positive sum, got "
+                f"{self.art_video_weight} and {self.art_audio_weight}."
+            )
 
 
 @dataclass

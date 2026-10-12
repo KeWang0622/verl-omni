@@ -39,6 +39,10 @@ class DiffusionAlgoConfig(BaseConfig):
     old_policy_update_interval: int = 1
     timestep_fraction: float = 1.0
     adv_mode: str = "continuous"
+    art_pairwise_reward: bool = False
+    art_exclude_final_step: bool = True
+    art_log_rollout_velocity_gap: bool = False
+    art_modality_reward_weights: Optional[dict] = None
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 
@@ -57,6 +61,15 @@ class DiffusionAlgoConfig(BaseConfig):
             raise ValueError(f"old_policy_update_interval must be positive, got {self.old_policy_update_interval}.")
         if not 0 < self.timestep_fraction <= 1:
             raise ValueError(f"timestep_fraction must be in (0, 1], got {self.timestep_fraction}.")
+        if self.art_modality_reward_weights is not None:
+            for modality, weights in dict(self.art_modality_reward_weights).items():
+                if modality not in ("video", "audio") or not isinstance(weights, dict) or not weights:
+                    raise ValueError(
+                        "art_modality_reward_weights must map 'video' / 'audio' to non-empty {reward_name: weight} "
+                        f"dicts, got {self.art_modality_reward_weights}."
+                    )
+                if any(float(value) < 0 for value in weights.values()):
+                    raise ValueError(f"art_modality_reward_weights.{modality} must be non-negative, got {weights}.")
 
 
 @dataclass

@@ -179,6 +179,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             "diffusion_dpo_model",
             "diffusion_nft_model",
             "omni_nft_model",
+            "diffusion_art_model",
         ):
             self.flops_counter = DiffusionFlopsCounter(
                 architecture=getattr(self.model_config, "architecture", None),
@@ -633,6 +634,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             "diffusion_dpo_model",
             "diffusion_nft_model",
             "omni_nft_model",
+            "diffusion_art_model",
         )
 
         # 1. build reference model

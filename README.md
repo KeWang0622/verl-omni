@@ -88,9 +88,9 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <th>Status</th>
   </tr>
   <tr>
-    <td rowspan="6">Qwen-Image & Qwen-Image-Edit</td>
-    <td rowspan="6">Diffusion generator</td>
-    <td rowspan="6">Text/Image → Image</td>
+    <td rowspan="7">Qwen-Image & Qwen-Image-Edit</td>
+    <td rowspan="7">Diffusion generator</td>
+    <td rowspan="7">Text/Image → Image</td>
     <td>FlowGRPO (+ CPS/SDE)</td>
     <td>✅</td>
   </tr>
@@ -113,6 +113,10 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
   <tr>
     <td>DPO</td>
     <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>WIP</td>
   </tr>
   <tr>
     <td>Wan2.2</td>

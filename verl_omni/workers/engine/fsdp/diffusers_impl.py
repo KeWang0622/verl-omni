@@ -1374,8 +1374,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
     def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
         x0 = micro_batch["latents_clean"]
         timestep = micro_batch["train_timesteps"][:, step]
-        t = timestep.float() / 1000.0
-        t_expanded = t.view(-1, *([1] * (x0.ndim - 1)))
+        t_expanded = self._flow_time(micro_batch, timestep, x0.ndim)
 
         if micro_batch.get("forward_noise", None) is not None:
             forward_noise = micro_batch["forward_noise"]
@@ -1384,6 +1383,26 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             noise = torch.randn_like(x0.float())
         xt = (1.0 - t_expanded) * x0 + t_expanded * noise
 
+        model_inputs, negative_model_inputs = self._prepare_conditioned_inputs(micro_batch, xt, timestep, step)
+        return model_inputs, negative_model_inputs, x0, xt, t_expanded
+
+    def _flow_time(self, micro_batch: TensorDict, timestep: torch.Tensor, ndim: int) -> torch.Tensor:
+        """Scheduler timesteps -> flow time ``t`` in ``(0, 1]``, shaped to broadcast against ``ndim``-D latents."""
+        num_train_timesteps = getattr(self.scheduler.config, "num_train_timesteps", None)
+        if num_train_timesteps is None:
+            raise ValueError(
+                "Converting `train_timesteps` to flow time requires "
+                f"scheduler.config.num_train_timesteps, but {type(self.scheduler).__name__} "
+                "does not define it."
+            )
+        tu.assign_non_tensor(micro_batch, num_train_timesteps=int(num_train_timesteps))
+        t = timestep.float() / float(num_train_timesteps)
+        return t.view(-1, *([1] * (ndim - 1)))
+
+    def _prepare_conditioned_inputs(
+        self, micro_batch: TensorDict, latents: torch.Tensor, timestep: torch.Tensor, step: int
+    ):
+        """Unpad / SP-pad the prompt embeddings and build the architecture-specific model inputs."""
         prompt_embeds = micro_batch["prompt_embeds"]
         prompt_embeds_mask = micro_batch["prompt_embeds_mask"]
         negative_prompt_embeds = micro_batch.get("negative_prompt_embeds", None)
@@ -1407,10 +1426,10 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             )
 
         self._unpad_condition_rows(micro_batch)
-        model_inputs, negative_model_inputs = prepare_model_inputs(
+        return prepare_model_inputs(
             module=self.module,
             model_config=self.model_config,
-            latents=xt,
+            latents=latents,
             timesteps=timestep,
             prompt_embeds=prompt_embeds,
             prompt_embeds_mask=prompt_embeds_mask,
@@ -1419,7 +1438,7 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             micro_batch=micro_batch,
             step=step,
         )
-        return model_inputs, negative_model_inputs, x0, xt, t_expanded
+
 
     def prepare_model_outputs(self, output, micro_batch: TensorDict):
         old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded = output
@@ -1695,6 +1714,93 @@ class OmniNFTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
             "loss": loss.detach().item(),
             "metrics": metrics,
         }
+
+
+@EngineRegistry.register(model_type="diffusion_art_model", backend=["fsdp", "fsdp2"], device=["cuda", "npu"])
+class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
+    """Diffusers FSDP engine for DiffusionART: old and current velocities at cached ODE rollout states.
+
+    Unlike the NFT engine it never re-noises the endpoint. ``train_latents[:, step]`` is the state the
+    ODE rollout actually visited at ``train_timesteps[:, step]``; the ``old`` LoRA adapter (the rollout
+    policy) recomputes ``v_old`` there and the ``default`` adapter gives ``v_theta``. No reference
+    forward is run because DiffusionART has no KL term.
+    """
+
+    def prepare_model_inputs(self, micro_batch: TensorDict, step: int):
+        xt = micro_batch["train_latents"][:, step]
+        timestep = micro_batch["train_timesteps"][:, step]
+        t_expanded = self._flow_time(micro_batch, timestep, xt.ndim)
+        model_inputs, negative_model_inputs = self._prepare_conditioned_inputs(micro_batch, xt, timestep, step)
+        return model_inputs, negative_model_inputs, None, xt, t_expanded
+
+    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+        old_prediction, forward_prediction, xt, t_expanded = output
+        return {
+            "old_prediction": old_prediction,
+            "forward_prediction": forward_prediction,
+            "xt": xt,
+            "t_expanded": t_expanded,
+        }
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, _, xt, t_expanded = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
+        )
+
+        with self.use_adapter("old"), torch.no_grad():
+            old_prediction = forward(
+                module=self.module,
+                model_config=self.model_config,
+                model_inputs=model_inputs,
+                negative_model_inputs=negative_model_inputs,
+            ).detach()
+
+        forward_prediction = forward(
+            module=self.module,
+            model_config=self.model_config,
+            model_inputs=model_inputs,
+            negative_model_inputs=negative_model_inputs,
+        )
+        self._set_adapter("default")
+
+        model_output = self.prepare_model_outputs(
+            output=(old_prediction, forward_prediction, xt, t_expanded), micro_batch=micro_batch
+        )
+
+        if loss_function is not None:
+            num_train_timesteps = float(tu.get_non_tensor_data(micro_batch, "num_train_timesteps"))
+            sigma_next = micro_batch["train_timesteps_next"][:, step].float() / num_train_timesteps
+            loss_inputs = {"art_guidance": micro_batch["art_guidance"], "sigma_next": sigma_next}
+            for key in ("video_seq_len", "art_anchor"):
+                if micro_batch.get(key, None) is not None:
+                    loss_inputs[key] = micro_batch[key]
+            if micro_batch.get("train_latents_next", None) is not None:
+                # Euler ODE step x_next = x_t + (sigma_next - sigma) v: the velocity the rollout actually used.
+                sigma = t_expanded.reshape(xt.shape[0], -1)[:, 0]
+                step_size = (sigma_next - sigma).view(-1, *([1] * (xt.ndim - 1)))
+                loss_inputs["rollout_velocity"] = (
+                    micro_batch["train_latents_next"][:, step].float() - xt.float()
+                ) / step_size
+            data = tu.get_tensordict(loss_inputs)
+            tu.assign_non_tensor(
+                data,
+                gradient_accumulation_steps=tu.get_non_tensor_data(
+                    micro_batch, "gradient_accumulation_steps", default=None
+                ),
+                sp_size=tu.get_non_tensor_data(micro_batch, "sp_size", default=None),
+            )
+            loss, metrics = loss_function(model_output=model_output, data=data, dp_group=self.get_data_parallel_group())
+        else:
+            assert forward_only, "forward_only must be True when loss_function is None"
+            loss = torch.tensor(1.0, device=xt.device)
+            metrics = {}
+
+        output = {
+            "model_output": model_output,
+            "loss": loss.detach().item(),
+            "metrics": metrics,
+        }
+        return loss, output
 
 
 class EngineEvalModeCtx(BaseEngineCtx):

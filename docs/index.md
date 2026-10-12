@@ -64,6 +64,7 @@ algo/flowgrpo.md
 algo/flowdppo.md
 algo/diffusion_dpo.md
 algo/diffusionnft.md
+algo/diffusionart.md
 algo/grpo_guard.md
 algo/mixgrpo.md
 algo/diffusion_opd.md
@@ -83,6 +84,7 @@ examples/dapo_trainer.md
 examples/dancegrpo_trainer.md
 examples/flux1/dancegrpo_trainer_flux1.md
 examples/diffusionnft_trainer.md
+examples/diffusionart_trainer.md
 examples/grpoguard_trainer.md
 examples/gspo_trainer.md
 examples/mixgrpo_trainer.md
