@@ -65,9 +65,17 @@ One training iteration (paper Algorithm 1):
    with $\delta = 10^{-5}$. An item is masked only when its drift is large
    *and* the update would move it further away from $v_{\text{old}}$; inward
    corrections are always kept. The factor $t$ emphasises high-noise states.
-6. **Pairwise variant** (Sec. 4.4). Each prompt's $K$ endpoints form $K/2$
-   random disjoint pairs; winner/loser labels $(1, 0)$, or $(1/2, 1/2)$ for
-   ties, replace $R_i$ in the covariance and nothing else changes.
+6. **Pairwise variant** (Sec. 4.4, App. C.3). Each prompt's $K$ endpoints form
+   $K/2$ random disjoint pairs; winner/loser labels $(1, 0)$, or $(1/2, 1/2)$ for
+   ties, replace $R_i$ in the covariance. Tie rows get no guidance; when the
+   batch holds at least one decided pair they act as *restore anchors* and
+   train toward $v_{\text{old}}$ only.
+
+Because $G(c)$ is a per-prompt covariance normalised to unit RMS, any per-prompt
+affine change of the rewards (group centring, division by a batch or group
+standard deviation) leaves it unchanged, so the update does not depend on
+verl-omni's advantage-normalisation knobs; only the *relative* scale of reward
+components matters when several are summed (see modality routing below).
 
 ## How verl-omni Implements DiffusionART
 
@@ -78,15 +86,35 @@ states instead of re-noised endpoints.
 | Layer | What it does | Code |
 |---|---|---|
 | Math | `art_guidance`, `art_pairwise_labels`, `art_reference_drift`, `art_loss` (pure tensors). | `verl_omni/trainer/diffusion/diffusion_art.py` |
-| Rollout adapter | Deterministic Qwen-Image rollout with the `old` adapter; keeps all `T + 1` fp32 states (`all_latents`) and the schedule (`all_timesteps`). | `verl_omni/pipelines/qwen_image_diffusion_art/` |
-| Batch preparation | Computes `G(c)` per `uid` from the endpoints and rewards, selects the states to train, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance`; drops `all_latents`. | `DiffusionARTLoss.prepare_actor_batch` |
-| Actor loss | Trust-region-masked frozen-target MSE, `1/|B|` average with masked items in the denominator. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
+| Rollout adapters | Deterministic rollouts with the `old` adapter that keep every visited fp32 state: Qwen-Image (`all_latents` with `T + 1` entries) and LTX-2.3 text-to-audio-video (`all_latents` + `all_next_latents` over the unified `[video \| audio]` tokens, `video_seq_len`). | `verl_omni/pipelines/qwen_image_diffusion_art/`, `verl_omni/pipelines/ltx2_diffusion_art/` |
+| Batch preparation | Computes `G(c)` per `uid` (per modality for audio-video latents) from the endpoints and rewards, draws the states to train from the first `T - 1` ODE positions (`algorithm.art_exclude_final_step`, as in the paper's recipes) times `algorithm.timestep_fraction`, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance` (+ `art_anchor`, `train_latents_next`); drops the raw trajectory. | `DiffusionARTLoss.prepare_actor_batch` |
+| Actor loss | Trust-region-masked frozen-target MSE, `1/|B|` average with masked items in the denominator; per-modality losses combined with `art_video_weight` / `art_audio_weight`. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
 | FSDP engine | `diffusion_art_model`: `old`-adapter and current velocities at `(train_latents[:, s], train_timesteps[:, s])`; no reference forward. | `ARTDiffusersFSDPEngine` in `verl_omni/workers/engine/fsdp/diffusers_impl.py` |
+| Golden test | Guidance, loss, masks and gradient reproduce the authors' `art_scalar_covariance` / `art_loss` (vanzll/DiffusionART @ `8652c8a`) to fp32 round-off on a stored fixture. | `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` |
+
+**Audio-video routing.** For LTX-2.3 the guidance is computed separately for the
+video and audio tokens, each from its own reward: `G_video = Cov(R_video, x0_video | c)`,
+`G_audio = Cov(R_audio, x0_audio | c)`, each unit-RMS. `R_video` / `R_audio` are
+weighted sums of the named reward components (standardised per component like
+DiffusionNFT advantages) with weights from `algorithm.art_modality_reward_weights`,
+or, when it is `null`, from `reward.reward_functions.<name>.routing_weights`
+(OmniNFT's assignment: VideoAlign and HPSv3 to video, AudioBox and CLAP to
+audio, DeSync to both). Without any routing information both modalities share
+the scalar reward.
 
 The old-policy velocity $v_{\text{old}}(s_t)$ is recomputed by the actor's `old`
 LoRA adapter at the cached state rather than cached from the vLLM-Omni rollout,
 so it equals the rollout prediction up to the numerical difference between the
-two execution backends. The two updates per rollout are realised by
+two execution backends *provided the training forward applies the same CFG as
+the rollout*; the trainer rejects configs whose `model.pipeline` and
+`rollout.pipeline` guidance scales differ, and
+`algorithm.art_log_rollout_velocity_gap=true` ships the next rollout state so the
+actor logs `actor/old_rollout_gap = mean((v_old - v_rollout)^2)` with
+$v_{\text{rollout}}$ the Euler velocity implied by consecutive states. The
+trainer also requires the hard-copied `old` adapter
+(`old_policy_decay_schedule=copy`, update interval 1), `ppo_epochs=1`,
+`rollout.n >= 2`, an ODE rollout and no KL term, so a config cannot silently
+stop being DiffusionART. The two updates per rollout are realised by
 `actor_rollout_ref.actor.ppo_mini_batch_size = data.train_batch_size / 2`;
 other splits log a warning (the paper's one-update ablation uses a single
 mini batch). The `old` adapter is refreshed with
@@ -99,10 +127,13 @@ paper's on-policy, EMA-free setting.
   recomputed with the `old` adapter on the training side (see above).
 - Only the `velocity_linear_sigma` and `velocity_uniform` loss weightings are
   implemented; the reference also offers an `x0`-space variant.
-- Only the Qwen-Image adapter pair is registered. Other architectures follow
-  the DiffusionNFT pattern (a thin subclass per architecture).
-- `algorithm.timestep_fraction < 1` subsamples the visited states with the
-  same seeded permutation as DiffusionNFT.
+- Qwen-Image and LTX-2.3 (text-to-audio-video only) adapter pairs are
+  registered. Other architectures follow the same pattern (a thin subclass per
+  architecture).
+- The paper selects a per-trajectory random subset of ODE positions; here
+  `algorithm.timestep_fraction < 1` subsamples the visited states per row with
+  DiffusionNFT's seeded permutation, and `art_exclude_final_step` (default
+  `true`) drops the last position as the paper's recipes do.
 
 ## Configuration
 
@@ -136,18 +167,36 @@ actor_rollout_ref.actor.use_kl_loss=False
   Default `0.8`.
 - `actor_rollout_ref.actor.diffusion_loss.art_corrective_mask_enabled`: `false`
   ablates the trust-region mask.
+- `actor_rollout_ref.actor.diffusion_loss.art_video_weight` /
+  `art_audio_weight`: weights of the per-modality losses for audio-video latents.
 - `algorithm.art_pairwise_reward`: DiffusionART-Pairwise labels instead of
   scalar rewards.
+- `algorithm.art_exclude_final_step`: drop the last ODE position from the
+  trainable pool. Default `true`.
+- `algorithm.art_log_rollout_velocity_gap`: log `actor/old_rollout_gap`
+  (doubles the cached-state memory). Default `false`.
+- `algorithm.art_modality_reward_weights`: `{video: {name: w}, audio: {name: w}}`
+  reward routing for audio-video models; `null` reads
+  `reward_functions.*.routing_weights`.
 - `algorithm.timestep_fraction`: fraction of visited states trained per rollout.
 
 ### Metrics
 
 `actor/policy_loss` (masked average), `actor/unmasked_loss`, `actor/active_frac`
-(prompts with non-zero guidance), `actor/mask_frac` and `actor/outward_frac`
-(over active items), `actor/old_deviate` (mean squared drift $d$),
-`actor/movement_score` (mean $m(s_t)$) and `actor/guidance_rms`.
+(prompts with non-zero guidance), `actor/anchor_frac`, `actor/mask_frac` and
+`actor/outward_frac` (over active items), `actor/old_deviate` (mean squared
+drift $d$), `actor/movement_score` (mean $m(s_t)$), `actor/guidance_rms` and,
+when enabled, `actor/old_rollout_gap`. Audio-video models report them as
+`actor/video/*` and `actor/audio/*`.
 
-## Reference Example
+## Reference Examples
+
+[`examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh)
+post-trains LTX-2.3 text-to-audio-video with LoRA on the OmniNFT reward set
+(VideoAlign, HPSv3, AudioBox, CLAP, DeSync) with exactly the OmniNFT LTX-2.3
+recipe's data, rewards, routing, LoRA and rollout settings, changing only the
+algorithm, so the two can be compared like-for-like. It requires the reward
+routing from PR #640.
 
 [`examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 post-trains `Qwen/Qwen-Image` with LoRA on the OCR task using
@@ -157,6 +206,7 @@ LoRA settings as the DiffusionNFT Qwen-Image recipe. See the
 
 ## Validation status
 
-CPU unit tests only (`tests/trainer/diffusion/test_diffusionart_*_on_cpu.py`).
-No GPU convergence run has been performed yet; training curves will be added to
-the example README when available.
+CPU math tests plus golden equivalence to the authors' code
+(`tests/trainer/diffusion/test_diffusionart_*_on_cpu.py`; fixture generated from
+vanzll/DiffusionART @ `8652c8a`). No GPU run has been performed yet; training
+curves will be added to the example README when available.

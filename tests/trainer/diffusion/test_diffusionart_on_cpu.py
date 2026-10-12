@@ -105,7 +105,70 @@ def test_loss_matches_the_pure_function_and_reports_metrics():
     ):
         assert key in result.metrics, key
     assert result.metrics["actor/active_frac"] == 1.0
+    assert result.metrics["actor/anchor_frac"] == 0.0
     assert result.metrics["actor/guidance_rms"] == pytest.approx(1.0, rel=1e-5)
+
+
+def test_loss_splits_audio_video_segments_with_modality_weights():
+    """With ``video_seq_len`` the loss is the weighted mean of two per-modality masked MSEs."""
+    inputs = make_inputs()
+    video_seq_len = torch.full((4,), 2, dtype=torch.long)  # dim 1 is C=4 here: tokens [0:2] video, [2:4] audio
+    model_output = {key: inputs[key] for key in DiffusionARTLoss.required_model_output_keys}
+    data = TensorDict(
+        {"art_guidance": inputs["art_guidance"], "sigma_next": inputs["sigma_next"], "video_seq_len": video_seq_len},
+        batch_size=[4],
+    )
+    result = get_diffusion_loss_fn("diffusion_art")(
+        config=make_actor(
+            art_video_weight=3.0, art_audio_weight=1.0, art_mask_metric="fixed_mse", art_mask_threshold=1e9
+        ),
+        model_output=model_output,
+        data=data,
+    )
+    sigma = inputs["t_expanded"].flatten()
+    expected = torch.zeros(4)
+    for rows, weight in ((slice(0, 2), 0.75), (slice(2, 4), 0.25)):
+        terms = art_loss(
+            inputs["forward_prediction"][:, rows],
+            inputs["old_prediction"][:, rows],
+            inputs["art_guidance"][:, rows],
+            sigma,
+            inputs["sigma_next"],
+            mask_metric="fixed_mse",
+            mask_threshold=1e9,
+        )
+        expected = expected + weight * terms["per_item_loss"]
+    torch.testing.assert_close(result.loss, expected.mean())
+    for modality in ("video", "audio"):
+        for name in ("unmasked_loss", "active_frac", "mask_frac", "guidance_rms", "old_deviate"):
+            assert f"actor/{modality}/{name}" in result.metrics
+    with pytest.raises(ValueError, match="video_seq_len"):
+        data["video_seq_len"] = torch.tensor([2, 2, 3, 2])
+        get_diffusion_loss_fn("diffusion_art")(config=make_actor(), model_output=model_output, data=data)
+
+
+def test_loss_restores_anchor_rows_toward_old_and_logs_rollout_gap():
+    inputs = make_inputs()
+    inputs["art_guidance"][1] = 0.0  # pairwise tie: no guidance
+    anchor = torch.tensor([False, True, False, False])
+    rollout_velocity = inputs["old_prediction"] + 0.1
+    model_output = {key: inputs[key] for key in DiffusionARTLoss.required_model_output_keys}
+    data = TensorDict(
+        {
+            "art_guidance": inputs["art_guidance"],
+            "sigma_next": inputs["sigma_next"],
+            "art_anchor": anchor,
+            "rollout_velocity": rollout_velocity,
+        },
+        batch_size=[4],
+    )
+    result = get_diffusion_loss_fn("diffusion_art")(config=make_actor(), model_output=model_output, data=data)
+    (grad,) = torch.autograd.grad(result.loss, inputs["forward_prediction"])
+    assert result.metrics["actor/anchor_frac"] == pytest.approx(0.25)
+    assert torch.count_nonzero(grad[1]) > 0  # anchor row trains (toward v_old)
+    drift = inputs["forward_prediction"][1].detach() - inputs["old_prediction"][1]
+    torch.testing.assert_close(grad[1], 2 * inputs["t_expanded"].flatten()[1] * drift / (4 * C * H * W))
+    assert result.metrics["actor/old_rollout_gap"] == pytest.approx(0.01, rel=1e-4)
 
 
 def test_loss_accepts_full_shape_t_expanded_and_requires_its_inputs():
@@ -145,9 +208,19 @@ def test_invalid_loss_config_values_raise(kwargs, match):
         DiffusionLossConfig(loss_mode="diffusion_art", **kwargs)
 
 
-def test_algorithm_config_exposes_pairwise_flag():
-    assert DiffusionAlgoConfig().art_pairwise_reward is False
-    assert DiffusionAlgoConfig(art_pairwise_reward=True).art_pairwise_reward is True
+def test_algorithm_config_exposes_art_knobs():
+    cfg = DiffusionAlgoConfig()
+    assert cfg.art_pairwise_reward is False and cfg.art_exclude_final_step is True
+    assert cfg.art_log_rollout_velocity_gap is False and cfg.art_modality_reward_weights is None
+    assert DiffusionAlgoConfig(art_modality_reward_weights={"video": {"a": 1.0}}).art_modality_reward_weights == {
+        "video": {"a": 1.0}
+    }
+    with pytest.raises(ValueError, match="art_modality_reward_weights"):
+        DiffusionAlgoConfig(art_modality_reward_weights={"text": {"a": 1.0}})
+    with pytest.raises(ValueError, match="non-negative"):
+        DiffusionAlgoConfig(art_modality_reward_weights={"audio": {"a": -1.0}})
+    with pytest.raises(ValueError, match="art_video_weight"):
+        DiffusionLossConfig(loss_mode="diffusion_art", art_video_weight=0.0, art_audio_weight=0.0)
 
 
 def make_rollout_batch(uid, num_steps=5, seed=0):
@@ -167,13 +240,20 @@ def make_rollout_batch(uid, num_steps=5, seed=0):
 
 def make_config(**algorithm_kwargs):
     algorithm = SimpleNamespace(
-        norm_adv_by_std_in_grpo=True, global_std=True, timestep_fraction=1.0, art_pairwise_reward=False
+        norm_adv_by_std_in_grpo=True,
+        global_std=True,
+        timestep_fraction=1.0,
+        art_pairwise_reward=False,
+        art_exclude_final_step=False,
+        art_log_rollout_velocity_gap=False,
+        art_modality_reward_weights=None,
     )
+    reward = algorithm_kwargs.pop("reward", None)
     for key, value in algorithm_kwargs.items():
         setattr(algorithm, key, value)
     algorithm.get = lambda key, default=None: getattr(algorithm, key, default)
     actor = SimpleNamespace(data_loader_seed=42)
-    return SimpleNamespace(algorithm=algorithm, actor_rollout_ref=SimpleNamespace(actor=actor))
+    return SimpleNamespace(algorithm=algorithm, actor_rollout_ref=SimpleNamespace(actor=actor), reward=reward)
 
 
 def test_prepare_actor_batch_writes_cached_states_and_shared_guidance():
@@ -224,6 +304,114 @@ def test_prepare_actor_batch_subsamples_states_and_supports_pairwise_labels():
     assert result.batch["art_guidance"][0].square().mean().sqrt().item() == pytest.approx(1.0, rel=1e-5)
 
 
+def test_prepare_actor_batch_excludes_the_final_ode_position_by_default():
+    batch = make_rollout_batch(["a", "a", "a", "a"], num_steps=5)
+    schedule = batch.batch["all_timesteps"][0].clone()
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, torch.tensor([0.1, 0.2, 0.3, 0.4]), make_config(art_exclude_final_step=True)
+    )
+    assert result.batch["train_timesteps"].shape == (4, 4)
+    assert schedule[-1] not in result.batch["train_timesteps"][0]
+    assert "train_latents_next" not in result.batch.keys()
+
+
+def test_prepare_actor_batch_pairwise_marks_ties_as_restore_anchors():
+    uid = ["a", "a", "a", "a", "b", "b", "b", "b"]
+    batch = make_rollout_batch(uid)
+    rewards = torch.tensor([0.9, 0.1, 0.5, 0.5, 0.3, 0.3, 0.3, 0.3])  # group a: one decided pair + one tie
+    result = DiffusionARTLoss.prepare_actor_batch(batch, rewards, make_config(art_pairwise_reward=True))
+    anchor = result.batch["art_anchor"]
+    guidance = result.batch["art_guidance"]
+    assert anchor.shape == (8,)
+    decided = ~anchor
+    # Tie rows carry no guidance but are anchors; decided rows share the prompt's unit-RMS direction.
+    assert torch.count_nonzero(guidance[anchor]) == 0
+    assert guidance[decided].flatten(1).square().mean(dim=1).sqrt().allclose(torch.ones(int(decided.sum())), atol=1e-5)
+    assert anchor[:4].sum() == 2 and anchor[4:].all()  # group b is all ties -> all anchors (batch has decided pairs)
+
+
+def make_av_rollout_batch(uid, num_steps=4, video_tokens=5, audio_tokens=3, channels=2):
+    """LTX-style layout: unified [video | audio] tokens, all_latents (B, T, ...) plus all_next_latents."""
+    generator = torch.Generator().manual_seed(1)
+    batch_size = len(uid)
+    tokens = video_tokens + audio_tokens
+    schedule = torch.linspace(1000.0, 250.0, num_steps)
+    return DataProto.from_dict(
+        tensors={
+            "all_latents": torch.randn(batch_size, num_steps, tokens, channels, generator=generator),
+            "all_next_latents": torch.randn(batch_size, num_steps, tokens, channels, generator=generator),
+            "all_timesteps": schedule.expand(batch_size, -1).clone(),
+            "video_seq_len": torch.full((batch_size,), video_tokens, dtype=torch.long),
+        },
+        non_tensors={
+            "uid": np.array(uid, dtype=object),
+            "reward/video_align": np.array([0.1, 0.9, 0.3, 0.5, 0.2, 0.8], dtype=np.float32),
+            "reward/clap": np.array([0.5, 0.5, 0.5, 0.5, 0.1, 0.9], dtype=np.float32),
+            "reward/desync": np.array([0.4, 0.2, 0.9, 0.1, 0.6, 0.3], dtype=np.float32),
+        },
+    )
+
+
+def test_prepare_actor_batch_routes_rewards_per_modality_for_audio_video_latents():
+    uid = ["a", "a", "a", "b", "b", "b"]
+    batch = make_av_rollout_batch(uid)
+    all_latents = batch.batch["all_latents"].clone()
+    all_next = batch.batch["all_next_latents"].clone()
+    combined = torch.tensor([0.5, 0.6, 0.7, 0.3, 0.2, 0.9])
+    routing = {"video": {"video_align": 1.0, "desync": 1.0}, "audio": {"clap": 1.0, "desync": 1.0}}
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, combined, make_config(art_modality_reward_weights=routing, art_log_rollout_velocity_gap=True)
+    )
+    guidance = result.batch["art_guidance"]
+    assert guidance.shape == (6, 8, 2)
+    video, audio = guidance[:, :5], guidance[:, 5:]
+    torch.testing.assert_close(video.flatten(1).square().mean(dim=1).sqrt(), torch.ones(6))
+    torch.testing.assert_close(audio.flatten(1).square().mean(dim=1).sqrt(), torch.ones(6))
+    torch.testing.assert_close(guidance[0], guidance[1])
+    assert not torch.allclose(video[0], video[3])
+    # Endpoint = last next-state; states are the visited ones; next states shipped for the velocity gap.
+    torch.testing.assert_close(result.batch["latents_clean"], all_next[:, -1])
+    assert result.batch["train_latents"].shape == (6, 4, 8, 2)
+    torch.testing.assert_close(result.batch["train_latents"].sort(dim=1).values, all_latents.sort(dim=1).values)
+    assert result.batch["train_latents_next"].shape == (6, 4, 8, 2)
+    assert "all_next_latents" not in result.batch.keys() and "all_latents" not in result.batch.keys()
+
+
+def test_prepare_actor_batch_reads_routing_weights_from_reward_functions():
+    from omegaconf import OmegaConf
+
+    uid = ["a", "a", "a", "b", "b", "b"]
+    reward = OmegaConf.create(
+        {
+            "reward_functions": {
+                "video_align": {"routing_weights": {"video": 1.0, "audio": 0.0}},
+                "clap": {"routing_weights": {"video": 0.0, "audio": 1.0}},
+                "desync": {"routing_weights": {"video": 1.0, "audio": 1.0}},
+            }
+        }
+    )
+    explicit = DiffusionARTLoss.prepare_actor_batch(
+        make_av_rollout_batch(uid),
+        torch.zeros(6),
+        make_config(
+            art_modality_reward_weights={
+                "video": {"video_align": 1.0, "desync": 1.0},
+                "audio": {"clap": 1.0, "desync": 1.0},
+            }
+        ),
+    )
+    from_reward_cfg = DiffusionARTLoss.prepare_actor_batch(
+        make_av_rollout_batch(uid), torch.zeros(6), make_config(reward=reward)
+    )
+    torch.testing.assert_close(explicit.batch["art_guidance"], from_reward_cfg.batch["art_guidance"])
+    with pytest.raises(ValueError, match="per-component scores"):
+        DiffusionARTLoss.prepare_actor_batch(
+            make_av_rollout_batch(uid),
+            torch.zeros(6),
+            make_config(art_modality_reward_weights={"video": {"missing": 1.0}, "audio": {"clap": 1.0}}),
+        )
+
+
 def test_prepare_actor_batch_rejects_missing_or_truncated_trajectories():
     batch = make_rollout_batch(["a", "a"])
     with pytest.raises(ValueError, match="all_latents"):
@@ -258,6 +446,9 @@ ART_OVERRIDES = [
     "actor_rollout_ref.actor.ppo_mini_batch_size=12",
     "actor_rollout_ref.rollout.rollout_adapter=old",
     "actor_rollout_ref.rollout.algo.noise_level=0.0",
+    "actor_rollout_ref.rollout.n=8",
+    "algorithm.old_policy_decay_schedule=copy",
+    "algorithm.old_policy_update_interval=1",
 ]
 
 
@@ -285,6 +476,12 @@ def test_validate_trainer_config_warns_on_a_single_update_per_rollout(caplog):
         ("actor_rollout_ref.actor.use_kl_loss=true", "use_kl_loss must be False"),
         ("actor_rollout_ref.actor.enable_timestep_staging=true", "enable_timestep_staging must be False"),
         ("algorithm.train_timestep_count=3", "only used by the dgpo loss"),
+        ("algorithm.old_policy_decay_schedule=linear_to_0_5", "old_policy_decay_schedule must be copy"),
+        ("algorithm.old_policy_decay=0.5", "old_policy_decay must be null or 0.0"),
+        ("algorithm.old_policy_update_interval=2", "old_policy_update_interval must be 1"),
+        ("actor_rollout_ref.actor.ppo_epochs=2", "ppo_epochs must be 1"),
+        ("actor_rollout_ref.rollout.n=1", "rollout.n must be >= 2"),
+        ("actor_rollout_ref.model.pipeline.true_cfg_scale=2.0", "true_cfg_scale=2.0 must equal"),
     ],
 )
 def test_validate_trainer_config_rejects_unsupported_settings(override, match):

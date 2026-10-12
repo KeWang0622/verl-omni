@@ -1645,12 +1645,19 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
 
         if loss_function is not None:
             num_train_timesteps = float(tu.get_non_tensor_data(micro_batch, "num_train_timesteps"))
-            data = tu.get_tensordict(
-                {
-                    "art_guidance": micro_batch["art_guidance"],
-                    "sigma_next": micro_batch["train_timesteps_next"][:, step].float() / num_train_timesteps,
-                }
-            )
+            sigma_next = micro_batch["train_timesteps_next"][:, step].float() / num_train_timesteps
+            loss_inputs = {"art_guidance": micro_batch["art_guidance"], "sigma_next": sigma_next}
+            for key in ("video_seq_len", "art_anchor"):
+                if micro_batch.get(key, None) is not None:
+                    loss_inputs[key] = micro_batch[key]
+            if micro_batch.get("train_latents_next", None) is not None:
+                # Euler ODE step x_next = x_t + (sigma_next - sigma) v: the velocity the rollout actually used.
+                sigma = t_expanded.reshape(xt.shape[0], -1)[:, 0]
+                step_size = (sigma_next - sigma).view(-1, *([1] * (xt.ndim - 1)))
+                loss_inputs["rollout_velocity"] = (
+                    micro_batch["train_latents_next"][:, step].float() - xt.float()
+                ) / step_size
+            data = tu.get_tensordict(loss_inputs)
             tu.assign_non_tensor(
                 data,
                 gradient_accumulation_steps=tu.get_non_tensor_data(

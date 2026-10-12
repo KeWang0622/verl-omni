@@ -113,6 +113,8 @@ actor_rollout_ref:
       art_mask_threshold: 1.0e-05
       art_reference_noise_level: 0.8
       art_corrective_mask_enabled: true
+      art_video_weight: 1.0
+      art_audio_weight: 1.0
     rollout_correction:
       _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig
       bypass_mode: ${oc.select:algorithm.rollout_correction.bypass_mode,false}
@@ -661,6 +663,9 @@ algorithm:
   train_timestep_count: null
   adv_mode: continuous
   art_pairwise_reward: false
+  art_exclude_final_step: true
+  art_log_rollout_velocity_gap: false
+  art_modality_reward_weights: null
   paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig

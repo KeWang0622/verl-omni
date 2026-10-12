@@ -14,9 +14,26 @@ the actor trains from the states those trajectories visited, and the `default`
 adapter is updated. There is no likelihood ratio, no differentiable reward, no EMA
 schedule and no KL term.
 
-> **Status:** CPU unit tests only. No GPU convergence run has been done yet; the
-> recipe below is the planned smoke configuration and will be updated with curves
-> once it has run. See [Validation status](#validation-status).
+> **Status:** CPU math tests + golden equivalence to the authors' code; no GPU
+> run yet. The recipes below are the planned configurations and will be updated
+> with curves once they have run. See [Validation status](#validation-status).
+
+Two recipes:
+
+- Qwen-Image OCR (below), the repository's standard smoke task.
+- LTX-2.3 text-to-audio-video,
+  [`ltx2/run_ltx2_t2av_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh)
+  with [`ltx2/ltx2_art.yaml`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/ltx2_art.yaml):
+  the OmniNFT LTX-2.3 recipe (PR #640; same VGGSound prompts, five rewards and
+  routing weights, LoRA r32/alpha64, lr 3e-5, 32 prompts x 8 samples,
+  256x384x121 frames, 20 rollout steps, 150 steps) with only the algorithm
+  changed, for a like-for-like comparison. Guidance is computed per modality
+  from the routed rewards (VideoAlign/HPSv3 -> video, AudioBox/CLAP -> audio,
+  DeSync -> both); the rollout is an ODE; the training forward uses the same CFG
+  as the rollout (video 1.5 / audio 3.0) because `v_old` is recomputed by it;
+  `ppo_mini_batch_size=16` of 32 prompts gives the two updates per rollout. It
+  needs PR #640's reward routing and models; follow that recipe's asset
+  preparation.
 
 ## Installation
 
@@ -81,11 +98,17 @@ possible.
 | `actor_rollout_ref.actor.diffusion_loss.art_mask_threshold` | `1e-5` | Drift threshold `delta` above which outward updates are masked. |
 | `actor_rollout_ref.actor.diffusion_loss.art_reference_noise_level` | `0.8` | `nu` of the reference SDE used by `sde_kl`. |
 | `actor_rollout_ref.actor.diffusion_loss.art_corrective_mask_enabled` | `true` | Set `false` to ablate the trust-region mask. |
-| `algorithm.art_pairwise_reward` | `false` | DiffusionART-Pairwise: random disjoint win/lose pairs replace the scalar rewards. |
+| `actor_rollout_ref.actor.diffusion_loss.art_video_weight` / `art_audio_weight` | `1.0` / `1.0` | Weights of the per-modality losses (audio-video models). |
+| `algorithm.art_pairwise_reward` | `false` | DiffusionART-Pairwise: random disjoint win/lose pairs replace the scalar rewards; ties become restore anchors. |
+| `algorithm.art_exclude_final_step` | `true` | Drop the last ODE position from the trainable state pool (paper recipes). |
+| `algorithm.art_log_rollout_velocity_gap` | `false` | Log `actor/old_rollout_gap` = mean((v_old - v_rollout)^2); doubles cached-state memory. |
+| `algorithm.art_modality_reward_weights` | `null` | `{video: {reward: w}, audio: {reward: w}}` routing; `null` reads `reward_functions.*.routing_weights`. |
 | `algorithm.timestep_fraction` | `1.0` | Fraction of visited ODE states trained per rollout. |
 
 ## Validation status
 
-- CPU unit tests: `tests/trainer/diffusion/test_diffusionart_math_on_cpu.py` and
-  `tests/trainer/diffusion/test_diffusionart_on_cpu.py`.
-- GPU: **not yet run**. No convergence curve is available for this recipe.
+- CPU unit tests: `tests/trainer/diffusion/test_diffusionart_math_on_cpu.py`,
+  `tests/trainer/diffusion/test_diffusionart_on_cpu.py` and the golden-value test
+  `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` (fixture generated
+  from vanzll/DiffusionART @ `8652c8a`; math matches to fp32 round-off).
+- GPU: **not yet run** for either recipe. No convergence curve is available.

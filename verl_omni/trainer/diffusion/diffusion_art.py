@@ -189,6 +189,7 @@ def art_loss(
     mask_threshold: float = 1e-5,
     reference_noise_level: float = 0.8,
     corrective_mask_enabled: bool = True,
+    restore_anchor: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Trust-region-masked frozen-target velocity MSE (paper Eq. 6-8, Algorithm 1).
 
@@ -199,7 +200,9 @@ def art_loss(
     score ``m(s_t)`` reaches ``mask_threshold`` *and* whose displacement points along the
     descent direction (``<d, target - v_theta> > 0``, an outward move). The weight is ``t``
     for ``velocity_linear_sigma`` and ``1`` for ``velocity_uniform``. Items with zero
-    guidance (inactive prompts) contribute zero loss but stay in the batch denominator.
+    guidance (inactive prompts) or ``t = 0`` contribute zero loss but stay in the batch
+    denominator, unless they are *restore anchors*: pairwise tie rows of a batch that holds
+    at least one decided pair (paper App. C.3) keep a pure restoration loss toward ``v_old``.
 
     Args:
         current_velocity: ``v_theta(s_t)``, ``(B, *latent_shape)``; the only input with gradient.
@@ -213,11 +216,12 @@ def art_loss(
         mask_threshold: Drift threshold ``delta`` (paper: ``1e-5``).
         reference_noise_level: ``nu`` of the reference SDE used by ``"sde_kl"``.
         corrective_mask_enabled: Disable to ablate the trust-region mask.
+        restore_anchor: Optional ``(B,)`` bool; inactive rows flagged here train toward ``v_old``.
 
     Returns:
         Dict with ``per_item_loss`` ``(B,)`` (differentiable), ``per_item_mse``, ``target``,
-        ``active``, ``keep_mask``, ``masked``, ``movement_energy``, ``movement_score`` and
-        ``outward_alignment`` (all ``(B,)`` except ``target``).
+        ``active``, ``anchor``, ``keep_mask``, ``masked``, ``movement_energy``,
+        ``movement_score`` and ``outward_alignment`` (all ``(B,)`` except ``target``).
     """
     if loss_space not in ART_LOSS_SPACES:
         raise ValueError(f"loss_space must be one of {ART_LOSS_SPACES}, got {loss_space!r}.")
@@ -233,7 +237,11 @@ def art_loss(
     if sigma.numel() != velocity.shape[0] or sigma_next.numel() != velocity.shape[0]:
         raise ValueError("sigma and sigma_next need one value per item.")
 
-    active = direction.flatten(1).square().sum(dim=1) > 0
+    active = (direction.flatten(1).square().sum(dim=1) > 0) & (sigma > 0)
+    if restore_anchor is None:
+        anchor = torch.zeros_like(active)
+    else:
+        anchor = restore_anchor.detach().to(device=active.device).reshape(-1).bool() & ~active & (sigma > 0)
     target = (old - float(guidance_gain) * direction).detach()
     residual = target - velocity
     per_item_mse = residual.square().flatten(1).mean(dim=1)
@@ -250,7 +258,7 @@ def art_loss(
         masked = active & (movement_score >= float(mask_threshold)) & (outward_alignment > 0)
         if not corrective_mask_enabled:
             masked = torch.zeros_like(masked)
-        keep = active & ~masked
+        keep = anchor | (active & ~masked)
 
     per_item_loss = torch.where(keep, weight * per_item_mse, torch.zeros_like(per_item_mse))
     return {
@@ -258,6 +266,7 @@ def art_loss(
         "per_item_mse": per_item_mse,
         "target": target,
         "active": active,
+        "anchor": anchor,
         "keep_mask": keep,
         "masked": masked,
         "movement_energy": movement_energy,

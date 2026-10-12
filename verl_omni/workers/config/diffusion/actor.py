@@ -54,6 +54,8 @@ class DiffusionLossConfig(BaseConfig):
     art_mask_threshold: float = 1e-5
     art_reference_noise_level: float = 0.8
     art_corrective_mask_enabled: bool = True
+    art_video_weight: float = 1.0
+    art_audio_weight: float = 1.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -96,6 +98,11 @@ class DiffusionLossConfig(BaseConfig):
             raise ValueError(f"art_mask_threshold must be positive, got {self.art_mask_threshold}.")
         if self.art_reference_noise_level <= 0:
             raise ValueError(f"art_reference_noise_level must be positive, got {self.art_reference_noise_level}.")
+        if self.art_video_weight < 0 or self.art_audio_weight < 0 or self.art_video_weight + self.art_audio_weight <= 0:
+            raise ValueError(
+                "art_video_weight and art_audio_weight must be non-negative with a positive sum, got "
+                f"{self.art_video_weight} and {self.art_audio_weight}."
+            )
 
 
 @dataclass
