@@ -14,28 +14,38 @@
 """Golden-value equivalence of verl-omni's DiffusionART math with the authors' implementation.
 
 Necessity: ``diffusion_art.py`` is a re-implementation from the paper, not a copy of the authors' code.
-The fixture ``fixtures/diffusionart_golden_8652c8a.pt`` was produced by running vanzll/DiffusionART at
+The fixture ``fixtures/diffusionart_golden_8652c8a.json`` was produced by running vanzll/DiffusionART at
 commit ``8652c8a100b01a5124781124a8ccdfc4d6bef158`` (``art_scalar_covariance`` with the paper
 configuration ``unit_normalized_covariance`` / ``zero_signal_mode=exact`` and ``art_loss`` with
 ``velocity_linear_sigma`` / ``scheduler_reference_metric`` / ``nu=0.8`` / ``delta=1e-5``) on seeded random
 inputs: 4 prompts x 8 endpoints (one prompt with constant rewards), latent shape (4, 5, 5), five flow times
 including ``t = 1`` and ``t_next = 0``, and current velocities with small drift plus large drift on every
-third row. No ``visual_rl`` dependency is needed here; only the inputs and outputs are stored.
+third row. No ``visual_rl`` dependency is needed here; only the inputs and outputs are stored, as JSON
+(float32 values written with their exact repr; see the fixture's ``provenance`` field).
 """
 
+import json
 from pathlib import Path
 
 import torch
 
 from verl_omni.trainer.diffusion.diffusion_art import art_guidance, art_loss
 
-FIXTURE = Path(__file__).parent / "fixtures" / "diffusionart_golden_8652c8a.pt"
+FIXTURE = Path(__file__).parent / "fixtures" / "diffusionart_golden_8652c8a.json"
+_DTYPES = {"float32": torch.float32, "int64": torch.int64, "bool": torch.bool}
 
 
 def load_fixture() -> dict:
-    fixture = torch.load(FIXTURE, weights_only=True)
-    assert "8652c8a100b01a5124781124a8ccdfc4d6bef158" in fixture["reference"]
-    return fixture
+    raw = json.loads(FIXTURE.read_text())
+    assert "8652c8a100b01a5124781124a8ccdfc4d6bef158" in raw["provenance"]["reference"]
+
+    def decode(section: dict) -> dict:
+        return {
+            key: torch.tensor(value["data"], dtype=_DTYPES[value["dtype"]]) if isinstance(value, dict) else value
+            for key, value in section.items()
+        }
+
+    return {name: decode(raw[name]) for name in ("inputs", "guidance", "loss")}
 
 
 def test_guidance_matches_authors_covariance_directions():
