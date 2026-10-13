@@ -19,7 +19,9 @@ back to a stochastic rollout would train without any error. These tests pin the 
 the start-up validation to what ``ARTDiffusersFSDPEngine`` and the recipe assume.
 """
 
+import json
 import logging
+import pathlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -326,10 +328,37 @@ def test_prepare_actor_batch_excludes_the_final_ode_position_by_default():
     assert "train_latents_next" not in result.batch.keys()
 
 
+def test_prepare_actor_batch_draws_a_fresh_state_subset_per_rollout():
+    """timestep_fraction < 1: the subset changes with global_steps and is reproducible for the same step."""
+    uid = ["a", "a", "a", "a"]
+    rewards = torch.tensor([0.1, 0.2, 0.3, 0.4])
+
+    def selection(step):
+        batch = make_rollout_batch(uid, num_steps=8)
+        batch.meta_info["global_steps"] = step
+        result = DiffusionARTLoss.prepare_actor_batch(batch, rewards, make_config(timestep_fraction=0.5))
+        return result.batch["train_timesteps"]
+
+    first, second, first_again = selection(1), selection(2), selection(1)
+    assert first.shape == (4, 4)
+    torch.testing.assert_close(first, first_again)
+    assert not torch.equal(first, second)
+    # Without global_steps the uids (fresh every rollout) seed the draw deterministically.
+    batch = make_rollout_batch(uid, num_steps=8)
+    once = DiffusionARTLoss.prepare_actor_batch(batch, rewards, make_config(timestep_fraction=0.5)).batch[
+        "train_timesteps"
+    ]
+    again = DiffusionARTLoss.prepare_actor_batch(
+        make_rollout_batch(uid, num_steps=8), rewards, make_config(timestep_fraction=0.5)
+    )
+    torch.testing.assert_close(once, again.batch["train_timesteps"])
+
+
 def test_prepare_actor_batch_pairwise_marks_ties_as_restore_anchors():
     uid = ["a", "a", "a", "a", "b", "b", "b", "b"]
     batch = make_rollout_batch(uid)
-    rewards = torch.tensor([0.9, 0.1, 0.5, 0.5, 0.3, 0.3, 0.3, 0.3])  # group a: one decided pair + one tie
+    # Group a: whichever random pairing is drawn, exactly one pair ties (0.9 vs 0.9) and one is decided.
+    rewards = torch.tensor([0.9, 0.9, 0.9, 0.1, 0.3, 0.3, 0.3, 0.3])
     result = DiffusionARTLoss.prepare_actor_batch(batch, rewards, make_config(art_pairwise_reward=True))
     anchor = result.batch["art_anchor"]
     guidance = result.batch["art_guidance"]
@@ -407,6 +436,149 @@ def test_prepare_actor_batch_accepts_component_matrix_rewards():
     with pytest.raises(ValueError, match="reward_names"):
         bad = make_av_rollout_batch(uid)
         DiffusionARTLoss.prepare_actor_batch(bad, matrix, make_config(art_modality_reward_weights=routing))
+
+
+OMNINFT_REWARD_METRIC_SUFFIXES = ("mean", "std", "min", "max")
+AV_NAMES = ["clap", "desync", "video_align"]
+
+
+def expected_reward_metric_keys(names):
+    keys = {"reward/sum/mean", "reward/sum/std"}
+    for name in names:
+        keys.update(f"reward/{name}/{stat}" for stat in OMNINFT_REWARD_METRIC_SUFFIXES)
+    return keys
+
+
+def expected_guidance_metric_keys(modalities):
+    keys = set()
+    for modality in modalities:
+        prefix = f"{modality}/" if modality else ""
+        keys.update(
+            f"{prefix}{name}"
+            for name in ("inactive_group_frac", "covariance_rms", "routed_reward_mean", "routed_reward_std")
+        )
+    return keys
+
+
+def attached_metric_names(result):
+    prefix = DiffusionARTLoss.batch_metric_prefix
+    return {k[len(prefix) :] for k in result.batch.keys() if isinstance(k, str) and k.startswith(prefix)}
+
+
+def test_prepare_actor_batch_attaches_omninft_reward_summaries_and_art_guidance_stats():
+    uid = ["a", "a", "a", "b", "b", "b"]
+    batch = make_av_rollout_batch(uid)
+    raw = {n: torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in AV_NAMES}
+    prefix = DiffusionARTLoss.batch_metric_prefix
+    scalar_reward = torch.tensor([0.1, 0.9, 0.3, 0.5, 0.2, 0.8])
+    result = DiffusionARTLoss.prepare_actor_batch(batch, scalar_reward, make_config())
+    assert attached_metric_names(result) == expected_reward_metric_keys(AV_NAMES) | expected_guidance_metric_keys(
+        ["video", "audio"]
+    )
+    # OmniNFT semantics: raw (un-normalised) scores, whole rollout batch, population std, replicated per sample.
+    torch.testing.assert_close(result.batch[f"{prefix}reward/clap/mean"], raw["clap"].mean().expand(6))
+    torch.testing.assert_close(result.batch[f"{prefix}reward/clap/std"], raw["clap"].std(correction=0).expand(6))
+    torch.testing.assert_close(result.batch[f"{prefix}reward/video_align/max"], raw["video_align"].max().expand(6))
+    torch.testing.assert_close(result.batch[f"{prefix}reward/sum/mean"], sum(raw.values()).mean().expand(6))
+    # Both prompts have varying rewards -> no inactive group; covariance RMS is a positive scalar per modality.
+    assert result.batch[f"{prefix}video/inactive_group_frac"][0] == 0.0
+    assert result.batch[f"{prefix}audio/covariance_rms"][0] > 0
+    # Without routing info the scalar reward feeds both modalities, so routed stats equal the scalar's.
+    torch.testing.assert_close(result.batch[f"{prefix}video/routed_reward_mean"][0], scalar_reward.mean())
+    torch.testing.assert_close(result.batch[f"{prefix}audio/routed_reward_std"][0], scalar_reward.std(correction=0))
+    # The loss reports them under OmniNFT's metric names from any micro batch slice.
+    data = TensorDict(
+        {k: v[:2] for k, v in result.batch.items() if isinstance(k, str) and k.startswith(prefix)}, batch_size=[2]
+    )
+    metrics = DiffusionARTLoss.collect_batch_metrics(data)
+    assert {k for k in metrics if k.startswith("actor/reward/")} == {
+        f"actor/{k}" for k in expected_reward_metric_keys(AV_NAMES)
+    }
+    assert metrics["actor/reward/clap/mean"] == pytest.approx(raw["clap"].mean().item())
+    assert "actor/video/covariance_rms" in metrics and "actor/audio/inactive_group_frac" in metrics
+
+
+def test_prepare_actor_batch_reward_summaries_from_component_matrix_and_inactive_groups():
+    uid = ["a", "a", "a", "b", "b", "b"]
+    batch = make_av_rollout_batch(uid)
+    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in AV_NAMES], dim=1)
+    matrix[3:, :] = 0.5  # prompt b: constant rewards -> inactive group
+    for n in AV_NAMES:
+        del batch.non_tensor_batch[f"reward/{n}"]
+    batch.batch["rm_scores"] = matrix.clone()
+    batch.meta_info["reward_names"] = AV_NAMES
+    prefix = DiffusionARTLoss.batch_metric_prefix
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, matrix, make_config(art_modality_reward_weights={"video": {"video_align": 1.0}, "audio": {"clap": 1.0}})
+    )
+    assert attached_metric_names(result) == expected_reward_metric_keys(AV_NAMES) | expected_guidance_metric_keys(
+        ["video", "audio"]
+    )
+    torch.testing.assert_close(result.batch[f"{prefix}reward/sum/std"], matrix.sum(dim=1).std(correction=0).expand(6))
+    assert result.batch[f"{prefix}video/inactive_group_frac"][0] == pytest.approx(0.5)
+    assert result.batch[f"{prefix}video/routed_reward_std"][0] > 0
+    # Single-modality batch without component infos: only the modality-free guidance stats are attached.
+    plain = DiffusionARTLoss.prepare_actor_batch(
+        make_rollout_batch(["a", "a"]), torch.tensor([0.0, 1.0]), make_config()
+    )
+    assert attached_metric_names(plain) == expected_guidance_metric_keys([""])
+
+
+def test_prepare_actor_batch_writes_per_sample_records(tmp_path):
+    uid = ["a", "a", "a", "b", "b", "b"]
+    batch = make_av_rollout_batch(uid)
+    batch.meta_info["global_steps"] = 7
+    batch.non_tensor_batch["extra_info"] = np.array([{"index": 10 + i // 3} for i in range(6)], dtype=object)
+    routing = {"video": {"video_align": 1.0, "desync": 1.0}, "audio": {"clap": 1.0, "desync": 1.0}}
+    reward = torch.tensor([0.5, 0.6, 0.7, 0.3, 0.2, 0.9])
+    DiffusionARTLoss.prepare_actor_batch(
+        batch,
+        reward,
+        make_config(art_modality_reward_weights=routing, art_sample_log_dir=str(tmp_path / "train_samples")),
+    )
+    path = tmp_path / "train_samples" / "step_7.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(rows) == 6
+    assert set(rows[0]) == {
+        "sample",
+        "uid",
+        "group_index",
+        "reward",
+        "prompt_index",
+        "reward_raw",
+        "reward_standardized",
+        "video_routed",
+        "video_group_active",
+        "audio_routed",
+        "audio_group_active",
+        "anchor",
+    }
+    assert rows[0]["uid"] == "a" and rows[3]["group_index"] == 1 and rows[3]["prompt_index"] == 11
+    assert set(rows[0]["reward_raw"]) == set(AV_NAMES) == set(rows[0]["reward_standardized"])
+    assert rows[0]["reward_raw"]["clap"] == pytest.approx(0.5) and rows[0]["reward"] == pytest.approx(0.5)
+    assert rows[0]["video_group_active"] is True and rows[0]["anchor"] == [False, False]
+    # Writer alone: deterministic file name and one line per row.
+    out = DiffusionARTLoss.write_sample_records(str(tmp_path / "w"), 3, [{"a": 1}, {"b": 2.5}])
+    assert out.endswith("step_3.jsonl") and pathlib.Path(out).read_text() == '{"a": 1}\n{"b": 2.5}\n'
+
+
+def test_loss_reports_per_modality_policy_loss_and_flow_time_buckets():
+    inputs = make_inputs()  # t = 1.0, 0.7, 0.4, 0.1 -> one item per bucket boundary case
+    video_seq_len = torch.full((4,), 2, dtype=torch.long)
+    model_output = {key: inputs[key] for key in DiffusionARTLoss.required_model_output_keys}
+    data = TensorDict(
+        {"art_guidance": inputs["art_guidance"], "sigma_next": inputs["sigma_next"], "video_seq_len": video_seq_len},
+        batch_size=[4],
+    )
+    result = get_diffusion_loss_fn("diffusion_art")(config=make_actor(), model_output=model_output, data=data)
+    for modality in ("video", "audio"):
+        assert f"actor/{modality}/policy_loss" in result.metrics
+        for bucket in ("t_high", "t_mid", "t_low"):
+            assert f"actor/{modality}/movement_score_{bucket}" in result.metrics
+            assert f"actor/{modality}/mask_frac_{bucket}" in result.metrics
+    video_losses = result.metrics["actor/video/policy_loss"]
+    audio_losses = result.metrics["actor/audio/policy_loss"]
+    assert result.metrics["actor/policy_loss"] == pytest.approx(0.5 * (video_losses + audio_losses), rel=1e-5)
 
 
 def test_prepare_actor_batch_reads_routing_weights_from_reward_functions():

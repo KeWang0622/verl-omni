@@ -45,6 +45,7 @@ class DiffusionAlgoConfig(BaseConfig):
     art_exclude_final_step: bool = True
     art_log_rollout_velocity_gap: bool = False
     art_modality_reward_weights: Optional[dict] = None
+    art_sample_log_dir: Optional[str] = None
     paired_preference: bool = False  # True for pair-based algorithms (e.g. DPO)
     rollout_correction: RolloutCorrectionConfig = field(default_factory=RolloutCorrectionConfig)
 

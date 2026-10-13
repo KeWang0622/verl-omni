@@ -91,6 +91,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     +reward.models.desync.placement.devices="$DESYNC_DEVICES" \
     +reward.models.desync.executor.kwargs.source_root="$DESYNC_SOURCE_ROOT" \
     "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR=$WANDB_DIR" \
+    algorithm.art_sample_log_dir="$output_dir/train_samples" \
     trainer.logger='["console","tensorboard","wandb"]' \
     trainer.project_name=diffusion_art \
     trainer.experiment_name=ltx2_3_art_lora_bs32_lr_3e-5 \

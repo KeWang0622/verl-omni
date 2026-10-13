@@ -139,8 +139,12 @@ paper's on-policy, EMA-free setting.
   architecture).
 - The paper selects a per-trajectory random subset of ODE positions; here
   `algorithm.timestep_fraction < 1` subsamples the visited states per row with
-  DiffusionNFT's seeded permutation, and `art_exclude_final_step` (default
-  `true`) drops the last position as the paper's recipes do.
+  DiffusionNFT's permutation helper, reseeded every rollout with
+  `data_loader_seed + global_steps` so each rollout batch trains a fresh subset
+  (DiffusionNFT itself reseeds with the fixed `data_loader_seed`, which repeats
+  the same subset each step). `art_exclude_final_step` (default `true`) drops the
+  last position as the paper's recipes do. With `timestep_fraction = 1.0` (all
+  recipes here) every kept position is trained and the seed is irrelevant.
 
 ## Configuration
 
@@ -203,7 +207,28 @@ Audio-video models report every metric per modality as `actor/video/*` and
 | `actor/old_deviate` | $\mathrm{mean}(d^2)$, the squared drift from $v_{\text{old}}$. | Zero on the first update (up to backend numerics), small and stable on the second. |
 | `actor/movement_score` | Mean $m(s_t)$, the reference-SDE KL proxy compared with `art_mask_threshold`. | Well below $10^{-5}$ on the first update. |
 | `actor/guidance_rms` | RMS of the guidance over items. | 1 when every prompt is active (`active_frac` otherwise). |
+| `actor/reward/<name>/{mean,std,min,max}`, `actor/reward/sum/{mean,std}` | Whole-rollout summaries of the raw reward components (population std; `sum` = unweighted total), same names and semantics as OmniNFT. Emitted when per-component scores are available (`reward/<name>` extra infos or component-mode `rm_scores`). | Per-component training curves comparable one-to-one with OmniNFT runs. |
+| `actor/<modality>/policy_loss` | Per-modality masked MSE (audio-video models); `actor/policy_loss` is their `art_video_weight` / `art_audio_weight` average. | Same key as OmniNFT's per-modality policy loss; magnitudes differ by construction (different objectives). |
+| `actor/<modality>/covariance_rms` | Mean over active prompts of the RMS of the raw reward-endpoint covariance before unit-RMS normalisation, i.e. the strength of the reward-endpoint correlation (in standardised-reward units). | Falls as rewards saturate within prompts; a collapse to 0 with `inactive_group_frac` rising means the reward no longer separates samples. |
+| `actor/<modality>/inactive_group_frac` | Fraction of prompts with zero guidance (constant rewards). | Near 0. |
+| `actor/<modality>/routed_reward_{mean,std}` | The routed (standardised, weighted) reward that feeds the covariance; ART's analogue of OmniNFT's `reward_prob_mean`. | Mean near 0 by construction (group centring); std stable. |
+| `actor/<modality>/movement_score_{t_high,t_mid,t_low}`, `mask_frac_{t_high,t_mid,t_low}` | Drift proxy and mask rate for states with $t \ge 2/3$, $1/3 \le t < 2/3$, $t < 1/3$ (keys appear when the micro batch holds active items in the bucket). | Shows where along the trajectory the trust region bites. |
 | `actor/old_rollout_gap` | `art_log_rollout_velocity_gap`: $\mathrm{mean}((v_{\text{old}} - v_{\text{rollout}})^2)$ with $v_{\text{rollout}}$ from consecutive rollout states. | Small and constant (backend numerics only). Growth means the training forward no longer reproduces the rollout (CFG mismatch, adapter not copied). |
+
+OmniNFT keys without an ART analogue: `actor/<modality>/positive_loss`,
+`negative_loss` (NFT's two implicit branches), `ref_kl_loss` (reference MSE; ART
+has no KL/reference term) and `reward_prob_mean` (NFT's optimality probability;
+see `routed_reward_mean` above).
+
+### Per-sample training records
+
+`algorithm.art_sample_log_dir=<dir>` writes `<dir>/step_<N>.jsonl`, one line per
+rollout sample: `sample`, `uid`, `group_index`, `prompt_index` (from
+`extra_info.index` when present), `reward` (the scalar the trainer logs),
+`reward_raw` / `reward_standardized` per component (when components are
+available), `<modality>_routed`, `<modality>_group_active`, pairwise labels and
+`anchor` flags. No latents or media are written; the file is a few kB per step
+and enables paired per-prompt analyses against other runs at matched steps.
 
 ## Reference Examples
 

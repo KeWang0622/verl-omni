@@ -37,6 +37,7 @@ def make_micro_batch(with_optional: bool) -> TensorDict:
         data["train_latents_next"] = torch.randn(B, T, TOKENS, C)
         data["video_seq_len"] = torch.full((B,), 4, dtype=torch.long)
         data["art_anchor"] = torch.tensor([False, True, False])
+        data["_art_metric::reward/clap/mean"] = torch.full((B,), 0.25)
     return TensorDict(data, batch_size=[B])
 
 
@@ -48,7 +49,14 @@ def test_loss_inputs_sigma_next_and_rollout_velocity_from_scheduler_count():
     micro_batch = make_micro_batch(with_optional=True)
     xt = micro_batch["train_latents"][:, 0]
     inputs = ARTDiffusersFSDPEngine.art_loss_inputs(micro_batch, 0, xt, flow_time(micro_batch, 0), 1000)
-    assert set(inputs) == {"art_guidance", "sigma_next", "video_seq_len", "art_anchor", "rollout_velocity"}
+    assert set(inputs) == {
+        "art_guidance",
+        "sigma_next",
+        "video_seq_len",
+        "art_anchor",
+        "rollout_velocity",
+        "_art_metric::reward/clap/mean",
+    }
     torch.testing.assert_close(inputs["sigma_next"], torch.full((B,), 0.5))
     expected_velocity = (micro_batch["train_latents_next"][:, 0] - xt) / (0.5 - 0.9)
     torch.testing.assert_close(inputs["rollout_velocity"], expected_velocity)

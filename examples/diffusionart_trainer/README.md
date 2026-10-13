@@ -107,6 +107,7 @@ possible.
 | `algorithm.art_log_rollout_velocity_gap` | `false` | Log `actor/old_rollout_gap` = mean((v_old - v_rollout)^2); doubles cached-state memory. |
 | `algorithm.art_modality_reward_weights` | `null` | `{video: {reward: w}, audio: {reward: w}}` routing; `null` reads `reward_functions.*.routing_weights`. |
 | `algorithm.timestep_fraction` | `1.0` | Fraction of visited ODE states trained per rollout. |
+| `algorithm.art_sample_log_dir` | `null` | Write per-sample training records (`step_<N>.jsonl`: uid, raw/standardised reward components, routed rewards, group) under this directory. |
 
 ## Validation status
 

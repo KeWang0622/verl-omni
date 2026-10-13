@@ -1633,6 +1633,10 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
         for key in ("video_seq_len", "art_anchor"):
             if micro_batch.get(key, None) is not None:
                 loss_inputs[key] = micro_batch[key]
+        # Whole-rollout scalars replicated per sample (logging only, see DiffusionARTLoss.batch_metric_prefix).
+        for key in micro_batch.keys():
+            if isinstance(key, str) and key.startswith("_art_metric::"):
+                loss_inputs[key] = micro_batch[key]
         if micro_batch.get("train_latents_next", None) is not None:
             sigma = t_expanded.reshape(xt.shape[0], -1)[:, 0]
             step_size = (sigma_next - sigma).view(-1, *([1] * (xt.ndim - 1)))

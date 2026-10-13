@@ -61,7 +61,8 @@ def art_guidance(
     rewards: torch.Tensor,
     group_index: torch.Tensor,
     num_groups: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_covariance_rms: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """Per-group reward-endpoint covariance normalised to unit RMS (paper Eq. 5).
 
     ``Cov(R, x0 | c) = 1/K sum_i (R_i - mean R)(x0_i - mean x0)`` over the ``K`` endpoints of
@@ -75,10 +76,13 @@ def art_guidance(
         rewards: One scalar reward (or pairwise label) per endpoint, ``(B,)``.
         group_index: Prompt index of every endpoint in ``[0, num_groups)``, ``(B,)`` int64.
         num_groups: Number of prompts in the batch.
+        return_covariance_rms: Also return the RMS of the raw covariance per group, ``(num_groups,)``
+            float32 (the strength of the reward-endpoint correlation before normalisation; a diagnostic).
 
     Returns:
         ``(guidance, active)``: ``guidance`` has shape ``(num_groups, *latent_shape)`` in
         float32 and is zero for inactive groups; ``active`` is a ``(num_groups,)`` bool mask.
+        With ``return_covariance_rms`` a third element ``covariance_rms`` is appended.
     """
     if endpoints.ndim < 2:
         raise ValueError(f"endpoints must have shape (B, ...), got {tuple(endpoints.shape)}.")
@@ -111,7 +115,10 @@ def art_guidance(
     active = (counts > 1) & ~constant & (rms > 0)
     direction = covariance / torch.where(active, rms, torch.ones_like(rms))[:, None]
     direction = torch.where(active[:, None], direction, torch.zeros_like(direction)).float()
-    return direction.reshape(num_groups, *endpoints.shape[1:]), active
+    guidance = direction.reshape(num_groups, *endpoints.shape[1:])
+    if return_covariance_rms:
+        return guidance, active, rms.float()
+    return guidance, active
 
 
 @torch.no_grad()
