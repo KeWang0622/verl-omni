@@ -1543,6 +1543,22 @@ class DiffusionARTLoss(DiffusionLossFn):
                     f"actor_rollout_ref.rollout.pipeline.{key}={rollout_value} "
                     "(v_old is recomputed by the training forward)"
                 )
+        # The training rollout may only use CFG: the training adapter recomputes v_old with CFG alone, so STG,
+        # modality and rescale guidance must stay neutral there (validation rollouts are free to use them).
+        for key, neutral in (
+            ("video_stg_scale", 0.0),
+            ("audio_stg_scale", 0.0),
+            ("video_modality_scale", 1.0),
+            ("audio_modality_scale", 1.0),
+            ("video_rescale_scale", 0.0),
+            ("audio_rescale_scale", 0.0),
+        ):
+            value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
+            if value is not None and float(value) != neutral:
+                problems.append(
+                    f"actor_rollout_ref.rollout.pipeline.{key}={value} must be {neutral} for the training rollout "
+                    "(only CFG is reproduced when v_old is recomputed); set it in rollout.val_kwargs.pipeline instead"
+                )
         if problems:
             raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
 

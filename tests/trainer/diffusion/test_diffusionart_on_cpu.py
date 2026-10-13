@@ -482,9 +482,22 @@ def test_validate_trainer_config_warns_on_a_single_update_per_rollout(caplog):
         ("actor_rollout_ref.actor.ppo_epochs=2", "ppo_epochs must be 1"),
         ("actor_rollout_ref.rollout.n=1", "rollout.n must be >= 2"),
         ("actor_rollout_ref.model.pipeline.true_cfg_scale=2.0", "true_cfg_scale=2.0 must equal"),
+        ("+actor_rollout_ref.rollout.pipeline.video_modality_scale=3.0", "video_modality_scale=3.0 must be 1.0"),
+        ("+actor_rollout_ref.rollout.pipeline.audio_rescale_scale=0.7", "audio_rescale_scale=0.7 must be 0.0"),
     ],
 )
 def test_validate_trainer_config_rejects_unsupported_settings(override, match):
     config = compose_trainer_config(ART_OVERRIDES + [override])
     with pytest.raises(ValueError, match=match):
         DiffusionARTLoss.validate_trainer_config(config)
+
+
+def test_validate_trainer_config_allows_guidance_extras_in_validation_only():
+    config = compose_trainer_config(
+        ART_OVERRIDES
+        + [
+            "+actor_rollout_ref.rollout.val_kwargs.pipeline.video_modality_scale=3.0",
+            "+actor_rollout_ref.rollout.val_kwargs.pipeline.audio_rescale_scale=0.7",
+        ]
+    )
+    DiffusionARTLoss.validate_trainer_config(config)

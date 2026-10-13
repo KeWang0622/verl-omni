@@ -15,8 +15,6 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 
@@ -35,7 +33,10 @@ class LTX23DiffusionARTPipeline(LTX23PipelineWithLogProb):
     ``all_timesteps`` / ``video_seq_len``) but runs a pure ODE: noise level 0 at every step, all
     ``T`` transitions recorded, no log-probabilities. Per-modality CFG (``video_cfg_scale`` /
     ``audio_cfg_scale``) is allowed because the DiffusionART training adapter applies the same
-    clean-space guidance when it recomputes ``v_old``.
+    clean-space guidance when it recomputes ``v_old``. STG, modality and rescale guidance are passed
+    through to the native LTX sampler untouched: validation rollouts (``val_kwargs``) may use them,
+    while ``DiffusionARTLoss.validate_trainer_config`` keeps them at their neutral values for the
+    training rollout, where the recomputed ``v_old`` has to match the sampled velocity.
     """
 
     supports_request_batch = False
@@ -47,20 +48,6 @@ class LTX23DiffusionARTPipeline(LTX23PipelineWithLogProb):
         for key in ("video_cfg_scale", "audio_cfg_scale"):
             configured = extra_args.get(key, None)
             extra_args[key] = float(configured) if configured is not None else guidance_scale
-        for key, expected in {
-            "video_stg_scale": 0.0,
-            "audio_stg_scale": 0.0,
-            "video_modality_scale": 1.0,
-            "audio_modality_scale": 1.0,
-            "video_rescale_scale": 0.0,
-            "audio_rescale_scale": 0.0,
-        }.items():
-            configured = float(extra_args.get(key, expected) if extra_args.get(key, None) is not None else expected)
-            if not math.isclose(configured, expected):
-                raise NotImplementedError(
-                    f"LTX-2.3 DiffusionART does not support {key}={configured}; expected {expected}."
-                )
-            extra_args[key] = expected
         task = extra_args.get("task")
         if task not in (None, "t2va"):
             raise NotImplementedError(f"LTX-2.3 DiffusionART supports text-to-audio-video only, got task={task!r}.")

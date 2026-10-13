@@ -51,7 +51,8 @@ run_timestamp=$(date +"%Y%m%d_%H%M")
 log_file=$output_dir/logs/$run_timestamp/${NODE_RANK:-0}.log
 rollout_data_dir=$output_dir/logs/$run_timestamp/rollout_videos
 validation_data_dir=$output_dir/logs/$run_timestamp/validation_videos
-WANDB_DIR=$output_dir
+# The trainer (and its wandb Tracking) runs inside the Ray TaskRunner actor, so export and forward WANDB_DIR.
+export WANDB_DIR=$output_dir
 
 mkdir -p "$checkpoint_dir" "$(dirname "$log_file")"
 exec > >(tee -a "$log_file") 2>&1
@@ -89,6 +90,7 @@ python3 -m verl_omni.trainer.main_diffusion \
     +reward.models.desync.model_path="$REWARD_ROOT/synchformer/synchformer_state_dict.pth" \
     +reward.models.desync.placement.devices="$DESYNC_DEVICES" \
     +reward.models.desync.executor.kwargs.source_root="$DESYNC_SOURCE_ROOT" \
+    "+ray_kwargs.ray_init.runtime_env.env_vars.WANDB_DIR=$WANDB_DIR" \
     trainer.logger='["console","tensorboard","wandb"]' \
     trainer.project_name=diffusion_art \
     trainer.experiment_name=ltx2_3_art_lora_bs32_lr_3e-5 \

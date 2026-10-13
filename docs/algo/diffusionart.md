@@ -46,9 +46,12 @@ One training iteration (paper Algorithm 1):
    disjoint halves and one MSE step
    $\mathcal{L}(s_t) = w(s_t)\,\mathrm{MSE}(v_\theta(s_t), v^{\text{ART}}_{\text{tgt}}(s_t))$
    is taken on each. With $d(s_t) = v_\theta(s_t) - v_{\text{old}}(s_t)$ the
-   second step descends along $G(c) - d(s_t)$: the same guidance plus a
-   restoration toward $v_{\text{old}}$ that grows with each state's drift, which
-   replaces the EMA schedule DiffusionNFT needs for stability.
+   second step's descent direction is
+   $v^{\text{ART}}_{\text{tgt}} - v_\theta = -G(c) - d(s_t)$ in verl-omni's
+   $v = \epsilon - x_0$ convention ($G(c) - d(s_t)$ in the paper's
+   $u_t = x_0 - \epsilon$ convention): the same guidance plus a restoration toward
+   $v_{\text{old}}$ that grows with each state's drift, which replaces the EMA
+   schedule DiffusionNFT needs for stability.
 5. **Trust-region mask** (Sec. 4.3). ODE transitions have no finite KL, so the
    paper measures drift through Flow-GRPO's ODE-to-SDE reference transition
    $q(\cdot \mid s_t) = \mathcal{N}(\mu(s_t, v), \sigma_{\text{ref}}^2(t) I)$ with
@@ -72,10 +75,12 @@ One training iteration (paper Algorithm 1):
    train toward $v_{\text{old}}$ only.
 
 Because $G(c)$ is a per-prompt covariance normalised to unit RMS, any per-prompt
-affine change of the rewards (group centring, division by a batch or group
-standard deviation) leaves it unchanged, so the update does not depend on
-verl-omni's advantage-normalisation knobs; only the *relative* scale of reward
-components matters when several are summed (see modality routing below).
+*positive* affine rescaling of the rewards $R' = aR + b$ with $a > 0$ (group
+centring, division by a batch or group standard deviation) leaves it unchanged,
+so the update does not depend on verl-omni's advantage-normalisation knobs
+($a < 0$ would flip the direction and $a = 0$ gives zero guidance); only the
+*relative* scale of reward components matters when several are summed (see
+modality routing below).
 
 ## How verl-omni Implements DiffusionART
 
@@ -88,7 +93,7 @@ states instead of re-noised endpoints.
 | Math | `art_guidance`, `art_pairwise_labels`, `art_reference_drift`, `art_loss` (pure tensors). | `verl_omni/trainer/diffusion/diffusion_art.py` |
 | Rollout adapters | Deterministic rollouts with the `old` adapter that keep every visited fp32 state: Qwen-Image (`all_latents` with `T + 1` entries) and LTX-2.3 text-to-audio-video (`all_latents` + `all_next_latents` over the unified `[video \| audio]` tokens, `video_seq_len`). | `verl_omni/pipelines/qwen_image_diffusion_art/`, `verl_omni/pipelines/ltx2_diffusion_art/` |
 | Batch preparation | Computes `G(c)` per `uid` (per modality for audio-video latents) from the endpoints and rewards, draws the states to train from the first `T - 1` ODE positions (`algorithm.art_exclude_final_step`, as in the paper's recipes) times `algorithm.timestep_fraction`, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance` (+ `art_anchor`, `train_latents_next`); drops the raw trajectory. | `DiffusionARTLoss.prepare_actor_batch` |
-| Actor loss | Trust-region-masked frozen-target MSE, `1/|B|` average with masked items in the denominator; per-modality losses combined with `art_video_weight` / `art_audio_weight`. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
+| Actor loss | Trust-region-masked frozen-target MSE, `1/\|B\|` average with masked items in the denominator; per-modality losses combined with `art_video_weight` / `art_audio_weight`. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
 | FSDP engine | `diffusion_art_model`: `old`-adapter and current velocities at `(train_latents[:, s], train_timesteps[:, s])`; no reference forward. | `ARTDiffusersFSDPEngine` in `verl_omni/workers/engine/fsdp/diffusers_impl.py` |
 | Golden test | Guidance, loss, masks and gradient reproduce the authors' `art_scalar_covariance` / `art_loss` (vanzll/DiffusionART @ `8652c8a`) to fp32 round-off on a stored fixture. | `tests/trainer/diffusion/test_diffusionart_golden_on_cpu.py` |
 
@@ -107,7 +112,9 @@ LoRA adapter at the cached state rather than cached from the vLLM-Omni rollout,
 so it equals the rollout prediction up to the numerical difference between the
 two execution backends *provided the training forward applies the same CFG as
 the rollout*; the trainer rejects configs whose `model.pipeline` and
-`rollout.pipeline` guidance scales differ, and
+`rollout.pipeline` guidance scales differ (and, for LTX-2.3, if the training rollout
+uses STG, modality or rescale guidance, which only the training forward's CFG can
+reproduce; validation rollouts may use them), and
 `algorithm.art_log_rollout_velocity_gap=true` ships the next rollout state so the
 actor logs `actor/old_rollout_gap = mean((v_old - v_rollout)^2)` with
 $v_{\text{rollout}}$ the Euler velocity implied by consecutive states. The

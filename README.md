@@ -127,11 +127,15 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>✅</td>
   </tr>
   <tr>
-    <td>LTX2.3</td>
-    <td>Diffusion generator</td>
-    <td>Text → Video + Audio</td>
+    <td rowspan="2">LTX2.3</td>
+    <td rowspan="2">Diffusion generator</td>
+    <td rowspan="2">Text → Video + Audio</td>
     <td>FlowGRPO</td>
     <td>✅</td>
+  </tr>
+  <tr>
+    <td><a href="docs/algo/diffusionart.md">DiffusionART</a></td>
+    <td>WIP</td>
   </tr>
   <tr>
     <td rowspan="2"><b>MiniMax-H3</b></td>
