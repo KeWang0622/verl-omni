@@ -684,6 +684,46 @@ def test_loss_reports_per_modality_policy_loss_and_flow_time_buckets():
     assert result.metrics["actor/policy_loss"] == pytest.approx(0.5 * (video_losses + audio_losses), rel=1e-5)
 
 
+def test_prepare_actor_batch_pairwise_k2_labels_each_modality_from_its_routed_reward():
+    """DiffusionART-Pairwise with K=2 (paper Sec. 4.4, App. C.3): one pair per prompt; per modality the label
+    comes from that modality's routed reward, the guidance is the unit-RMS winner-minus-loser direction of that
+    modality's endpoint tokens, and a tied pair (constant routed reward) makes both rows restore anchors."""
+    uid = ["a", "a", "b", "b", "c", "c"]
+    batch = make_av_rollout_batch(uid)
+    endpoints = batch.batch["all_next_latents"][:, -1].clone()
+    # Video route = video_align, audio route = clap: prompt b ties on video_align, prompt c ties on clap.
+    batch.non_tensor_batch["reward/video_align"] = np.array([0.9, 0.1, 0.5, 0.5, 0.2, 0.8], dtype=np.float32)
+    batch.non_tensor_batch["reward/clap"] = np.array([0.1, 0.9, 0.3, 0.7, 0.4, 0.4], dtype=np.float32)
+    routing = {"video": {"video_align": 1.0}, "audio": {"clap": 1.0}}
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, torch.zeros(6), make_config(art_pairwise_reward=True, art_modality_reward_weights=routing)
+    )
+    guidance, anchor = result.batch["art_guidance"], result.batch["art_anchor"]
+    assert anchor.shape == (6, 2)  # one anchor flag per modality
+    video, audio = guidance[:, :5], guidance[:, 5:]
+
+    def unit(x):
+        return x / x.square().mean().sqrt()
+
+    # Prompt a: row 0 wins on video, row 1 wins on audio -> opposite directions per modality, same for both rows.
+    torch.testing.assert_close(video[0], unit(endpoints[0, :5] - endpoints[1, :5]), rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(video[1], video[0])
+    torch.testing.assert_close(audio[0], unit(endpoints[1, 5:] - endpoints[0, 5:]), rtol=1e-5, atol=1e-6)
+    assert anchor[0].tolist() == [False, False]
+    # Prompt b: video tie -> zero video guidance and video anchors; audio decided.
+    assert torch.count_nonzero(video[2:4]) == 0 and anchor[2].tolist() == [True, False]
+    assert audio[2].square().mean().sqrt().item() == pytest.approx(1.0, rel=1e-5)
+    # Prompt c: audio tie -> audio anchors, video decided.
+    assert torch.count_nonzero(audio[4:6]) == 0 and anchor[4].tolist() == [False, True]
+    # Odd group sizes are rejected.
+    with pytest.raises(ValueError, match="even group size"):
+        DiffusionARTLoss.prepare_actor_batch(
+            make_av_rollout_batch(["a", "a", "a", "b", "b", "b"]),
+            torch.zeros(6),
+            make_config(art_pairwise_reward=True, art_modality_reward_weights=routing),
+        )
+
+
 def test_prepare_actor_batch_reads_routing_weights_from_reward_functions():
     from omegaconf import OmegaConf
 
