@@ -1478,7 +1478,12 @@ class DiffusionARTLoss(DiffusionLossFn):
 
     @staticmethod
     def _bucket_metrics(prefix: str, terms: dict[str, torch.Tensor], sigma: torch.Tensor) -> dict[str, float]:
-        """Trust-region drift and mask rate per flow-time bucket (``t_high`` >= 2/3, ``t_mid``, ``t_low`` < 1/3)."""
+        """Trust-region drift and mask rate per flow-time bucket (``t_high`` >= 2/3, ``t_mid``, ``t_low`` < 1/3).
+
+        Every key is emitted on every call (``0.0`` for an empty bucket) together with ``n_items_<bucket>``, the
+        number of active items it averaged over: the dp aggregation requires an identical key set and value count
+        on every micro batch and rank, so no key may be conditional.
+        """
         metrics: dict[str, float] = {}
         with torch.no_grad():
             active = terms["active"]
@@ -1489,10 +1494,14 @@ class DiffusionARTLoss(DiffusionLossFn):
             )
             for name, in_bucket in buckets:
                 selected = active & in_bucket
-                if not bool(selected.any()):
-                    continue  # keys appear only when the micro batch holds active items in the bucket
-                metrics[f"{prefix}movement_score_{name}"] = terms["movement_score"][selected].mean().item()
-                metrics[f"{prefix}mask_frac_{name}"] = terms["masked"][selected].float().mean().item()
+                count = int(selected.sum().item())
+                metrics[f"{prefix}n_items_{name}"] = float(count)
+                if count:
+                    metrics[f"{prefix}movement_score_{name}"] = terms["movement_score"][selected].mean().item()
+                    metrics[f"{prefix}mask_frac_{name}"] = terms["masked"][selected].float().mean().item()
+                else:
+                    metrics[f"{prefix}movement_score_{name}"] = 0.0
+                    metrics[f"{prefix}mask_frac_{name}"] = 0.0
         return metrics
 
     def __call__(

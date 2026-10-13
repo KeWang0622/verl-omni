@@ -599,6 +599,37 @@ def test_trainers_attach_global_steps_before_preparing_the_actor_batch(trainer_m
     assert seen == {"global_steps": 12, "reward_shape": (2,)}
 
 
+def test_loss_metric_key_set_is_identical_across_micro_batches():
+    """dp aggregation needs the same keys (one value each) on every micro batch and rank: empty buckets and
+    all-inactive batches must still emit every key (0.0 + n_items_<bucket> = 0)."""
+
+    def run(inputs):
+        model_output = {key: inputs[key] for key in DiffusionARTLoss.required_model_output_keys}
+        data = TensorDict(
+            {
+                "art_guidance": inputs["art_guidance"],
+                "sigma_next": inputs["sigma_next"],
+                "video_seq_len": torch.full((4,), 2, dtype=torch.long),
+            },
+            batch_size=[4],
+        )
+        return get_diffusion_loss_fn("diffusion_art")(config=make_actor(), model_output=model_output, data=data).metrics
+
+    normal = run(make_inputs())  # t = 1.0, 0.7, 0.4, 0.1 -> every bucket populated
+    one_bucket = make_inputs()
+    one_bucket["t_expanded"] = torch.full((4, 1, 1, 1), 0.9)  # only t_high populated
+    one_bucket["sigma_next"] = torch.full((4,), 0.8)
+    inactive = make_inputs()
+    inactive["art_guidance"] = torch.zeros_like(inactive["art_guidance"])  # every group inactive
+    for other in (run(one_bucket), run(inactive)):
+        assert set(other) == set(normal)
+        assert all(isinstance(v, float) for v in other.values())
+    empty = run(one_bucket)
+    assert empty["actor/video/n_items_t_low"] == 0.0 and empty["actor/video/mask_frac_t_low"] == 0.0
+    assert empty["actor/video/n_items_t_high"] == 4.0
+    assert run(inactive)["actor/audio/n_items_t_high"] == 0.0 and run(inactive)["actor/audio/active_frac"] == 0.0
+
+
 def test_loss_reports_per_modality_policy_loss_and_flow_time_buckets():
     inputs = make_inputs()  # t = 1.0, 0.7, 0.4, 0.1 -> one item per bucket boundary case
     video_seq_len = torch.full((4,), 2, dtype=torch.long)
@@ -613,6 +644,7 @@ def test_loss_reports_per_modality_policy_loss_and_flow_time_buckets():
         for bucket in ("t_high", "t_mid", "t_low"):
             assert f"actor/{modality}/movement_score_{bucket}" in result.metrics
             assert f"actor/{modality}/mask_frac_{bucket}" in result.metrics
+            assert result.metrics[f"actor/{modality}/n_items_{bucket}"] >= 1.0
     video_losses = result.metrics["actor/video/policy_loss"]
     audio_losses = result.metrics["actor/audio/policy_loss"]
     assert result.metrics["actor/policy_loss"] == pytest.approx(0.5 * (video_losses + audio_losses), rel=1e-5)
