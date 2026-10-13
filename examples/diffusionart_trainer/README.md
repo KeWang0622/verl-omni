@@ -31,9 +31,12 @@ Two recipes:
   from the routed rewards (VideoAlign/HPSv3 -> video, AudioBox/CLAP -> audio,
   DeSync -> both); the rollout is an ODE; the training forward uses the same CFG
   as the rollout (video 1.5 / audio 3.0) because `v_old` is recomputed by it;
-  `ppo_mini_batch_size=16` of 32 prompts gives the two updates per rollout. It
-  needs PR #640's reward routing and models; follow that recipe's asset
-  preparation.
+  `ppo_mini_batch_size=16` of 32 prompts gives the two updates per rollout. The
+  native VideoAlign / HPSv3 / AudioBox / CLAP / DeSync scorers it uses are on
+  main since #663 part 1; ART reads their per-component `reward/<name>` scores
+  under the default `weighted_sum` aggregation, so it does not need
+  `preserve_components` (still pending #664). Model and data asset preparation
+  follows the OmniNFT recipe (PR #640).
 
 ## Installation
 

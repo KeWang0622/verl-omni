@@ -78,6 +78,17 @@ def test_registry_and_contract():
     assert DiffusionLossConfig(loss_mode="diffusion_art").art_mask_metric == "sde_kl"
 
 
+@pytest.mark.parametrize("backend", ["fsdp", "fsdp2"])
+def test_art_engine_is_registered_for_both_fsdp_backends(backend):
+    from verl.workers.engine.base import EngineRegistry
+
+    from verl_omni.workers.engine import ARTDiffusersFSDPEngine, NFTDiffusersFSDPEngine
+
+    engine_cls = EngineRegistry.get_engine_cls(model_type="diffusion_art_model", backend=backend)
+    assert engine_cls is ARTDiffusersFSDPEngine
+    assert issubclass(engine_cls, NFTDiffusersFSDPEngine)
+
+
 def test_loss_matches_the_pure_function_and_reports_metrics():
     inputs = make_inputs()
     result = run_loss(inputs, art_guidance_gain=0.5, art_mask_metric="fixed_mse", art_mask_threshold=1e-3)

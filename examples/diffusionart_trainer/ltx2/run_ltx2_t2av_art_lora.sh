@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # LTX-2.3 text-to-audio-video DiffusionART LoRA recipe on 8 GPUs: the OmniNFT LTX-2.3 recipe
-# (PR #640, batch 32 x n 8, 150 steps) with only the algorithm changed. Requires PR #640's reward
-# routing (routing_weights / preserve_components / native reward executors). NOT GPU-VALIDATED YET.
+# (PR #640, batch 32 x n 8, 150 steps) with only the algorithm changed. Runs on main as of #663 part 1
+# (native audio-video scorers); see ltx2_art.yaml for the reward-stack notes. NOT GPU-VALIDATED YET.
 # Prepare parquet/model assets first; DATA_DIR, MODEL_PATH and REWARD_ROOT override defaults.
 set -euo pipefail
 

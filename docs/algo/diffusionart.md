@@ -187,14 +187,23 @@ actor_rollout_ref.actor.use_kl_loss=False
   `reward_functions.*.routing_weights`.
 - `algorithm.timestep_fraction`: fraction of visited states trained per rollout.
 
-### Metrics
+### Metrics to watch
 
-`actor/policy_loss` (masked average), `actor/unmasked_loss`, `actor/active_frac`
-(prompts with non-zero guidance), `actor/anchor_frac`, `actor/mask_frac` and
-`actor/outward_frac` (over active items), `actor/old_deviate` (mean squared
-drift $d$), `actor/movement_score` (mean $m(s_t)$), `actor/guidance_rms` and,
-when enabled, `actor/old_rollout_gap`. Audio-video models report them as
-`actor/video/*` and `actor/audio/*`.
+Audio-video models report every metric per modality as `actor/video/*` and
+`actor/audio/*`.
+
+| Metric | Meaning | Healthy pattern |
+|---|---|---|
+| `actor/policy_loss` | Masked `1/\|B\|` average of $w(s_t)\,\mathrm{MSE}$. | Equals $t \cdot \text{gain}^2$ averaged over kept items on the first update of a rollout (zero drift); lower on the second. A sustained rise means $v_\theta$ is drifting away from the frozen targets. |
+| `actor/unmasked_loss` | Same MSE before masking, over active items. | Tracks `policy_loss`; a widening gap means the mask is removing many items. |
+| `actor/active_frac` | Fraction of items whose prompt has non-zero guidance. | Near 1. A drop means many prompts have constant rewards (saturated or broken reward). |
+| `actor/mask_frac` | Fraction of active items zeroed by the trust region. | Near 0 on the first update, small on the second. Values approaching 1 mean the policy moved too far in one rollout: lower the learning rate before touching `art_mask_threshold`. |
+| `actor/outward_frac` | Fraction of active items whose displacement points along the descent direction. | Moderate; it is the mask's trigger condition before the drift threshold is applied. |
+| `actor/anchor_frac` | Pairwise mode only: tie rows restored toward $v_{\text{old}}$. | Falls as the policy separates pairs. |
+| `actor/old_deviate` | $\mathrm{mean}(d^2)$, the squared drift from $v_{\text{old}}$. | Zero on the first update (up to backend numerics), small and stable on the second. |
+| `actor/movement_score` | Mean $m(s_t)$, the reference-SDE KL proxy compared with `art_mask_threshold`. | Well below $10^{-5}$ on the first update. |
+| `actor/guidance_rms` | RMS of the guidance over items. | 1 when every prompt is active (`active_frac` otherwise). |
+| `actor/old_rollout_gap` | `art_log_rollout_velocity_gap`: $\mathrm{mean}((v_{\text{old}} - v_{\text{rollout}})^2)$ with $v_{\text{rollout}}$ from consecutive rollout states. | Small and constant (backend numerics only). Growth means the training forward no longer reproduces the rollout (CFG mismatch, adapter not copied). |
 
 ## Reference Examples
 
@@ -202,8 +211,10 @@ when enabled, `actor/old_rollout_gap`. Audio-video models report them as
 post-trains LTX-2.3 text-to-audio-video with LoRA on the OmniNFT reward set
 (VideoAlign, HPSv3, AudioBox, CLAP, DeSync) with exactly the OmniNFT LTX-2.3
 recipe's data, rewards, routing, LoRA and rollout settings, changing only the
-algorithm, so the two can be compared like-for-like. It requires the reward
-routing from PR #640.
+algorithm, so the two can be compared like-for-like. Its reward stack (native
+audio-video scorers, `routing_weights`) is on main since #663 part 1; the
+`preserve_components` aggregation pending #664 is not needed because ART routes
+the `reward/<name>` component scores itself.
 
 [`examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/qwen_image/run_qwen_image_ocr_lora.sh)
 post-trains `Qwen/Qwen-Image` with LoRA on the OCR task using

@@ -1609,7 +1609,7 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
         model_inputs, negative_model_inputs = self._prepare_conditioned_inputs(micro_batch, xt, timestep, step)
         return model_inputs, negative_model_inputs, None, xt, t_expanded
 
-    def prepare_model_outputs(self, output, micro_batch: TensorDict):
+    def prepare_model_outputs(self, output, micro_batch: TensorDict) -> dict[str, torch.Tensor]:
         old_prediction, forward_prediction, xt, t_expanded = output
         return {
             "old_prediction": old_prediction,

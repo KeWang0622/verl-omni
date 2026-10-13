@@ -21,7 +21,13 @@
 # is an ODE (noise level 0) that keeps every visited state, the training forward uses the SAME CFG as the
 # rollout (v_old is recomputed by it), the old adapter is hard-copied every step (no EMA), and
 # ppo_mini_batch_size = train_batch_size / 2 gives the paper's two disjoint updates per rollout batch.
-# The reward section (routing_weights / preserve_components / native reward executors) requires PR #640.
+# Reward stack: the native VideoAlign / HPSv3 / AudioBox / CLAP / DeSync scorers, `backend: native`
+# executors with `placement`, and the reserved `routing_weights` key are all on main since #663 part 1
+# (fb5fb70). `aggregation: preserve_components` (rm_scores [B, K]) is still rejected on main until the
+# companion OmniNFT consumer (#664) lands, and DiffusionART does not need it: the manager's default
+# `weighted_sum` already exposes every component as `reward/<name>`, which `DiffusionARTLoss` routes to
+# the video/audio latents with the `routing_weights` below. The combined weighted sum is used for
+# logging/advantage metrics only.
 hydra:
   searchpath:
     - pkg://verl_omni.trainer.config
@@ -170,7 +176,7 @@ reward:
     enabled: false
   reward_manager:
     name: MultiVisualRewardManager
-  aggregation: preserve_components
+  aggregation: weighted_sum
   models:
     video_align:
       backend: native
