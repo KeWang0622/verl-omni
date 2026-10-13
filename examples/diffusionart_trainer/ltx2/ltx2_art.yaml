@@ -214,6 +214,7 @@ reward:
       score_weights: [0.5, 0.0, 0.5]
       score_means: [3.6757, 0.0, 2.8105]
       score_stds: [2.2476, 1.0, 2.5121]
+      fps: 24.0  # #663 scorers take fps as a reward-function kwarg; must match rollout.pipeline.frame_rate
       weight: 1.0
       required: true
       routing_weights: {video: 1.0, audio: 0.0}
@@ -255,6 +256,7 @@ reward:
       path: pkg://verl_omni.utils.reward_score.desync
       name: compute_score
       model: desync
+      fps: 24.0  # #663 scorers take fps as a reward-function kwarg; must match rollout.pipeline.frame_rate
       weight: 1.0
       required: true
       routing_weights: {video: 1.0, audio: 1.0}
