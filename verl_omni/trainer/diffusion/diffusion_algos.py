@@ -1686,6 +1686,9 @@ class DiffusionARTLoss(DiffusionLossFn):
         """Turn ODE rollouts into DiffusionART actor tensors: cached states, schedule and per-prompt guidance.
 
         Requires the full trajectory from a ``diffusion_art`` rollout adapter (see ``_trajectory``).
+        ``reward_tensor`` is the ``(B,)`` scalar reward, or the ``(B, K)`` component matrix when the reward
+        manager runs with ``aggregation=preserve_components``; in that case the columns feed the modality
+        routing and their unweighted sum is the scalar used for the logging tensors.
         Writes ``train_latents`` ``(B, S, *latent)``, ``train_timesteps`` / ``train_timesteps_next``
         ``(B, S)`` (``S`` states per rollout drawn from the first ``T - 1`` ODE positions by default,
         ``algorithm.art_exclude_final_step``, times ``algorithm.timestep_fraction``), ``art_guidance``
@@ -1701,6 +1704,16 @@ class DiffusionARTLoss(DiffusionLossFn):
         for key in ("all_latents", "all_timesteps"):
             if key not in batch.batch.keys():
                 raise ValueError(f"DiffusionART actor batch requires `{key}` from the diffusion_art rollout adapter.")
+        if reward_tensor.ndim == 2:
+            # reward.aggregation=preserve_components hands over the [B, K] component matrix (columns follow
+            # meta_info["reward_names"]); routing reads the columns, the unweighted total is the logging scalar.
+            if batch.meta_info.get("reward_names") is None:
+                raise ValueError("DiffusionART received a 2-D reward tensor without meta_info['reward_names'].")
+            if "rm_scores" not in batch.batch.keys():
+                batch.batch["rm_scores"] = reward_tensor.detach().float()
+            reward_tensor = reward_tensor.sum(dim=1)
+        elif reward_tensor.ndim != 1:
+            raise ValueError(f"DiffusionART expects a (B,) or (B, K) reward tensor, got {tuple(reward_tensor.shape)}.")
         states, next_states, all_timesteps = cls._trajectory(batch)
         batch_size, num_steps = all_timesteps.shape
         endpoints = next_states[:, -1].float()

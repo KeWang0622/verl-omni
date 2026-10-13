@@ -388,6 +388,27 @@ def test_prepare_actor_batch_routes_rewards_per_modality_for_audio_video_latents
     assert "all_next_latents" not in result.batch.keys() and "all_latents" not in result.batch.keys()
 
 
+def test_prepare_actor_batch_accepts_component_matrix_rewards():
+    """reward.aggregation=preserve_components: rm_scores [B, K] arrives as the reward tensor (OmniNFT base)."""
+    uid = ["a", "a", "a", "b", "b", "b"]
+    batch = make_av_rollout_batch(uid)
+    names = ["clap", "desync", "video_align"]
+    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in names], dim=1)
+    for n in names:
+        del batch.non_tensor_batch[f"reward/{n}"]
+    batch.batch["rm_scores"] = matrix.clone()
+    batch.meta_info["reward_names"] = names
+    routing = {"video": {"video_align": 1.0, "desync": 1.0}, "audio": {"clap": 1.0, "desync": 1.0}}
+    result = DiffusionARTLoss.prepare_actor_batch(batch, matrix, make_config(art_modality_reward_weights=routing))
+    assert result.batch["advantages"].shape == (6, 4)
+    torch.testing.assert_close(result.batch["sample_level_rewards"][:, 0], matrix.sum(dim=1))
+    guidance = result.batch["art_guidance"]
+    torch.testing.assert_close(guidance[:, :5].flatten(1).square().mean(dim=1).sqrt(), torch.ones(6))
+    with pytest.raises(ValueError, match="reward_names"):
+        bad = make_av_rollout_batch(uid)
+        DiffusionARTLoss.prepare_actor_batch(bad, matrix, make_config(art_modality_reward_weights=routing))
+
+
 def test_prepare_actor_batch_reads_routing_weights_from_reward_functions():
     from omegaconf import OmegaConf
 
