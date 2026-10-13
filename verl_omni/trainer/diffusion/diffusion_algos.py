@@ -1610,8 +1610,10 @@ class DiffusionARTLoss(DiffusionLossFn):
 
         The rollout policy must be the exact old policy (hard-copied ``old`` adapter, no EMA), each
         visited state is used once per rollout (``ppo_epochs=1``), the guidance is a per-prompt
-        covariance (``rollout.n >= 2``), the rollout is an ODE, and ``v_old`` is recomputed by the
-        training forward, so the training-side CFG must equal the rollout CFG. The paper's two-update
+        covariance (``rollout.n >= 2``), the rollout is an ODE, ``v_old`` is recomputed by the
+        training forward, so the training-side CFG must equal the rollout CFG, and the per-rank mini
+        batch (``ppo_mini_batch_size * n / dp`` samples) must be divisible by
+        ``ppo_micro_batch_size_per_gpu``, which the engine otherwise asserts only after the first rollout. The paper's two-update
         restoration follows from ``ppo_mini_batch_size`` splitting the rollout batch in two; any other
         split only logs a warning so ablations stay possible.
         """
@@ -1677,6 +1679,26 @@ class DiffusionARTLoss(DiffusionLossFn):
                     f"actor_rollout_ref.rollout.pipeline.{key}={value} must be {neutral} for the training rollout "
                     "(only CFG is reproduced when v_old is recomputed); set it in rollout.val_kwargs.pipeline instead"
                 )
+        # Micro-batching: each rank receives ppo_mini_batch_size * n / dp samples per mini batch and the engine
+        # (verl prepare_micro_batches, force_group_size defaults to 1) asserts that this count is divisible by
+        # ppo_micro_batch_size_per_gpu -- after the first rollout, so check it here. ART guidance is per sample, so
+        # micro batches need not hold whole rollout groups.
+        n = int(rollout_cfg.n)
+        micro = actor_cfg.get("ppo_micro_batch_size_per_gpu", None)
+        sp_size = int(OmegaConf.select(actor_cfg, "fsdp_config.ulysses_sequence_parallel_size", default=1) or 1)
+        dp_size = max(int(config.trainer.n_gpus_per_node) * int(config.trainer.nnodes) // sp_size, 1)
+        mini_samples = int(actor_cfg.ppo_mini_batch_size) * n
+        if mini_samples % dp_size:
+            problems.append(
+                f"ppo_mini_batch_size * rollout.n = {mini_samples} samples must be divisible by the dp size {dp_size}"
+            )
+        elif micro is not None and (mini_samples // dp_size) % int(micro):
+            per_gpu = mini_samples // dp_size
+            problems.append(
+                f"each rank gets {per_gpu} samples per mini batch (ppo_mini_batch_size {actor_cfg.ppo_mini_batch_size} x "
+                f"rollout.n {n} / dp {dp_size}), which must be divisible by ppo_micro_batch_size_per_gpu={micro}; set it "
+                f"to a divisor of {per_gpu} or raise ppo_mini_batch_size"
+            )
         if problems:
             raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
 

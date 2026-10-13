@@ -91,6 +91,19 @@ The paper's two disjoint updates per rollout batch are expressed through
 trainer logs a warning for any other split so the one-update ablation stays
 possible.
 
+### Pairwise K=2 arm (paper Sec. 4.4)
+
+`actor_rollout_ref.rollout.n=2 algorithm.art_pairwise_reward=true` turns the LTX
+recipe into the paper's pairwise setting (one win/lose pair per prompt and
+modality; 64 rollouts per step instead of 256). Keep `ppo_mini_batch_size=16`
+(prompts) for the two updates per rollout, and note the micro-batching
+constraint: each rank receives `ppo_mini_batch_size * n / dp` samples per mini
+batch and the engine asserts (after the first rollout) that this is divisible by
+`ppo_micro_batch_size_per_gpu`. At 8 GPUs that is `16 * 2 / 8 = 4` samples per
+rank, so `ppo_micro_batch_size_per_gpu` must divide 4 (`1`, `2` or `4`; run1's
+`16` fails). The trainer now checks this at start-up. ART guidance is computed per
+sample, so micro batches do not have to hold whole rollout groups.
+
 ## Key knobs
 
 | Flag | Default | Meaning |

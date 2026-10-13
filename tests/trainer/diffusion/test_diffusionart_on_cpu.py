@@ -839,6 +839,39 @@ def test_validate_trainer_config_rejects_unsupported_settings(override, match):
         DiffusionARTLoss.validate_trainer_config(config)
 
 
+@pytest.mark.parametrize(
+    "n, mini, micro, gpus, ok",
+    [
+        (8, 16, 16, 8, True),  # LTX K=8 arm: 16 samples per rank, one micro batch of 16
+        (2, 16, 16, 8, False),  # LTX K=2 arm as first launched: 4 samples per rank, micro 16 -> engine assertion
+        (2, 16, 2, 8, True),  # K=2 fix: 4 samples per rank = 2 micro batches of 2
+        (2, 16, 4, 8, True),  # also valid: one micro batch of 4
+        (2, 16, 3, 8, False),  # 4 samples per rank not divisible by 3
+        (4, 3, 1, 8, False),  # 12 samples not divisible by dp 8
+    ],
+)
+def test_validate_trainer_config_checks_per_rank_micro_batching(n, mini, micro, gpus, ok):
+    overrides = [
+        o
+        for o in ART_OVERRIDES
+        if not o.startswith(("actor_rollout_ref.rollout.n=", "actor_rollout_ref.actor.ppo_mini_batch_size="))
+    ]
+    overrides += [
+        f"actor_rollout_ref.rollout.n={n}",
+        f"actor_rollout_ref.actor.ppo_mini_batch_size={mini}",
+        f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={micro}",
+        f"trainer.n_gpus_per_node={gpus}",
+        "trainer.nnodes=1",
+        f"data.train_batch_size={2 * mini}",
+    ]
+    config = compose_trainer_config(overrides)
+    if ok:
+        DiffusionARTLoss.validate_trainer_config(config)
+    else:
+        with pytest.raises(ValueError, match="divisible by"):
+            DiffusionARTLoss.validate_trainer_config(config)
+
+
 def test_validate_trainer_config_allows_guidance_extras_in_validation_only():
     config = compose_trainer_config(
         ART_OVERRIDES
