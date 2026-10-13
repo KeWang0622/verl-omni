@@ -230,8 +230,11 @@ available), `<modality>_routed`, `<modality>_group_active`, pairwise labels and
 `anchor` flags. No latents or media are written; the file is a few kB per step
 and enables paired per-prompt analyses against other runs at matched steps. An
 `index.jsonl` in the same directory records `step`, `step_key`, `seed`, `file`
-and `n_rows` per write, so files stay orderable even if a trainer path did not
-attach `global_steps` and the uid-hash fallback named the file.
+and `n_rows` per write, so files stay orderable even if a rollout path did not
+stamp `global_steps` and the uid-hash fallback named the file. The step is read
+from the per-sample `global_steps` field the rollout strategy adds to the batch
+(never written to `meta_info`, which `to_tensordict` folds into the worker
+TensorDict and would collide).
 
 ## Reference Examples
 

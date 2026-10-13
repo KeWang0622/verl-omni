@@ -1730,12 +1730,27 @@ class DiffusionARTLoss(DiffusionLossFn):
         return rows
 
     @staticmethod
-    def _step_seed(batch: DataProto, base_seed: int) -> int:
-        """Deterministic per-rollout seed: ``data_loader_seed + global_steps``, or a hash of the ``uid``s when
-        the trainer did not attach ``global_steps`` to ``meta_info`` (uids are fresh every step)."""
-        global_steps = batch.meta_info.get("global_steps")
+    def _global_step(batch: DataProto) -> Optional[int]:
+        """The trainer step of this rollout, if the batch carries it.
+
+        The rollout strategy stamps ``global_steps`` per sample into the batch (non-tensor or tensor field);
+        ``meta_info`` is honoured too but must never be *written* by trainers: ``DataProto.to_tensordict`` folds
+        ``meta_info`` into the worker TensorDict and asserts that no key collides with a batch field.
+        """
+        value = batch.meta_info.get("global_steps")
+        if value is None and "global_steps" in batch.non_tensor_batch:
+            value = np.asarray(batch.non_tensor_batch["global_steps"]).reshape(-1)[0]
+        if value is None and "global_steps" in batch.batch.keys():
+            value = batch.batch["global_steps"].reshape(-1)[0].item()
+        return None if value is None else int(value)
+
+    @classmethod
+    def _step_seed(cls, batch: DataProto, base_seed: int) -> int:
+        """Deterministic per-rollout seed: ``data_loader_seed + global_steps``, or a hash of the ``uid``s when the
+        batch carries no step (uids are fresh every rollout)."""
+        global_steps = cls._global_step(batch)
         if global_steps is not None:
-            return base_seed + int(global_steps)
+            return base_seed + global_steps
         return base_seed + zlib.crc32("".join(map(str, batch.non_tensor_batch["uid"])).encode())
 
     @staticmethod
@@ -1941,10 +1956,10 @@ class DiffusionARTLoss(DiffusionLossFn):
         cls._attach_batch_metrics(batch, batch_metrics, batch_size)
         sample_log_dir = algorithm_cfg.get("art_sample_log_dir", None)
         if sample_log_dir:
-            global_steps = batch.meta_info.get("global_steps")
+            global_steps = cls._global_step(batch)
             cls.write_sample_records(
                 str(sample_log_dir),
-                int(global_steps) if global_steps is not None else f"uid{step_seed}",
+                global_steps if global_steps is not None else f"uid{step_seed}",
                 cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
                 seed=step_seed,
             )

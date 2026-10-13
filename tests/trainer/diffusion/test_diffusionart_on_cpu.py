@@ -570,33 +570,67 @@ def test_prepare_actor_batch_writes_per_sample_records(tmp_path):
     ]
 
 
-@pytest.mark.parametrize(
-    "trainer_module",
-    ["verl_omni.trainer.diffusion.ray_diffusion_trainer", "verl_omni.trainer.diffusion.v1.trainer_base"],
-)
-def test_trainers_attach_global_steps_before_preparing_the_actor_batch(trainer_module):
-    """The rollout union carries no step, so both direct-preference trainers set meta_info['global_steps']."""
-    import importlib
-
-    module = importlib.import_module(trainer_module)
-    trainer_cls = (
-        module.DirectPreferenceRayTrainer
-        if hasattr(module, "DirectPreferenceRayTrainer")
-        else module.PolicyGradientDiffusionTrainerV1
+def make_post_rollout_av_batch(uid, step=3):
+    """What the v0 trainer hands prepare_actor_batch on an LTX-2.3 run: trajectory tensors, rollout media fields,
+    per-sample `global_steps` stamped by the rollout strategy, reward component infos and the component matrix."""
+    batch = make_av_rollout_batch(uid)
+    batch_size = len(uid)
+    names = AV_NAMES
+    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in names], dim=1)
+    extra = DataProto.from_dict(
+        tensors={
+            "rm_scores": matrix.clone(),
+            "prompt_embeds": torch.zeros(batch_size, 7, 8),
+            "audio": torch.zeros(batch_size, 2400),
+            "audio_sample_rate": torch.full((batch_size,), 24000),
+            "fps": torch.full((batch_size,), 24.0),
+            "input_ids": torch.zeros(batch_size, 4, dtype=torch.long),
+            "attention_mask": torch.ones(batch_size, 4, dtype=torch.long),
+        },
+        non_tensors={
+            "reward_inputs": np.array([{"text": {"video": "p", "audio": "p"}}] * batch_size, dtype=object),
+            "extra_info": np.array([{"index": i // 3} for i in range(batch_size)], dtype=object),
+            "data_source": np.array(["vggsound"] * batch_size, dtype=object),
+            "global_steps": np.array([step] * batch_size, dtype=object),
+        },
     )
-    seen = {}
+    batch = batch.union(extra)
+    batch.meta_info["reward_names"] = list(names)
+    return batch, matrix
 
-    class StubLoss:
-        @staticmethod
-        def prepare_actor_batch(batch, reward_tensor, config):
-            seen["global_steps"] = batch.meta_info.get("global_steps")
-            seen["reward_shape"] = tuple(reward_tensor.shape)
-            return batch
 
-    fake_self = SimpleNamespace(global_steps=12, _loss_fn=StubLoss(), config=None)
-    batch = make_rollout_batch(["a", "a"])
-    trainer_cls._prepare_actor_batch(fake_self, batch, torch.tensor([[0.1], [0.2]]))
-    assert seen == {"global_steps": 12, "reward_shape": (2,)}
+def test_prepared_batch_converts_to_the_worker_tensordict(tmp_path):
+    """The real driver->worker conversion must accept everything prepare_actor_batch adds (no key collisions)."""
+    from verl_omni.trainer.diffusion.diffusion_trainer_utils import _to_diffusion_worker_tensordict
+
+    batch, matrix = make_post_rollout_av_batch(["a", "a", "a", "b", "b", "b"], step=3)
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, matrix, make_config(art_log_rollout_velocity_gap=True, art_sample_log_dir=str(tmp_path))
+    )
+    td = _to_diffusion_worker_tensordict(result)
+    assert "art_guidance" in td.keys() and "train_latents_next" in td.keys()
+    # The step comes from the per-sample rollout field, so the per-sample file is step_<N>.jsonl.
+    assert (tmp_path / "step_3.jsonl").exists()
+    assert "global_steps" not in result.meta_info
+
+
+def test_meta_info_key_colliding_with_a_batch_field_is_rejected_by_the_conversion():
+    """Pins the hazard: DataProto.to_tensordict folds meta_info into the TensorDict and asserts no collision, so
+    trainers must not write e.g. meta_info['global_steps'] (the rollout already stamps it per sample)."""
+    from verl_omni.trainer.diffusion.diffusion_trainer_utils import _to_diffusion_worker_tensordict
+
+    batch, _ = make_post_rollout_av_batch(["a", "a", "a", "b", "b", "b"], step=3)
+    batch.meta_info["global_steps"] = 3
+    with pytest.raises(AssertionError):
+        _to_diffusion_worker_tensordict(batch)
+
+
+def test_step_is_read_from_the_per_sample_rollout_field():
+    batch, matrix = make_post_rollout_av_batch(["a", "a", "a", "b", "b", "b"], step=11)
+    assert DiffusionARTLoss._global_step(batch) == 11
+    assert DiffusionARTLoss._step_seed(batch, 42) == 53
+    without = make_av_rollout_batch(["a", "a", "a", "b", "b", "b"])
+    assert DiffusionARTLoss._global_step(without) is None
 
 
 def test_loss_metric_key_set_is_identical_across_micro_batches():
