@@ -23,7 +23,7 @@ Two recipes:
 - Qwen-Image OCR (below), the repository's standard smoke task.
 - LTX-2.3 text-to-audio-video,
   [`ltx2/run_ltx2_t2av_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh)
-  with [`ltx2/ltx2_art.yaml`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/ltx2_art.yaml):
+  (a shell script with explicit hydra overrides, like the other recipes in this repository):
   the OmniNFT LTX-2.3 recipe (PR #640; same VGGSound prompts, five rewards and
   routing weights, LoRA r32/alpha64, lr 3e-5, 32 prompts x 8 samples,
   256x384x121 frames, 20 rollout steps, 150 steps) with only the algorithm
