@@ -1779,8 +1779,13 @@ class DirectPreferenceRayTrainer(BaseRayDiffusionTrainer):
         return DataProto.from_tensordict(tu.get_tensordict(ref_output))
 
     def _prepare_actor_batch(self, batch: DataProto, reward_tensor: torch.Tensor) -> DataProto:
-        """Delegate algorithm-specific rollout-to-actor batch preparation."""
+        """Delegate algorithm-specific rollout-to-actor batch preparation.
+
+        The training step is attached as ``meta_info["global_steps"]`` so losses can seed per-rollout draws and
+        name per-step artefacts (the rollout union does not carry it).
+        """
         reward_tensor = reward_tensor.squeeze(-1).float() if reward_tensor.ndim > 1 else reward_tensor.float()
+        batch.meta_info.setdefault("global_steps", int(self.global_steps))
         return self._loss_fn.prepare_actor_batch(batch, reward_tensor, self.config)
 
     def _update_old_policy(self) -> tuple[bool, float, Literal["none", "copy", "ema"]]:

@@ -1555,13 +1555,27 @@ class DiffusionARTLoss(DiffusionLossFn):
         return summaries
 
     @staticmethod
-    def write_sample_records(directory: str, step: Any, rows: list[dict[str, Any]]) -> str:
-        """Write one JSON line per rollout sample to ``<directory>/step_<step>.jsonl`` and return the path."""
+    def write_sample_records(directory: str, step: Any, rows: list[dict[str, Any]], seed: Optional[int] = None) -> str:
+        """Write one JSON line per rollout sample to ``<directory>/step_<step>.jsonl`` and return the path.
+
+        Also appends ``{"step", "seed", "file", "n_rows"}`` to ``<directory>/index.jsonl`` so files can be ordered
+        post hoc even when ``step`` had to fall back to the uid-hash key.
+        """
         os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, f"step_{step}.jsonl")
+        filename = f"step_{step}.jsonl"
+        path = os.path.join(directory, filename)
         with open(path, "w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
+        with open(os.path.join(directory, "index.jsonl"), "a", encoding="utf-8") as handle:
+            entry = {
+                "step": step if isinstance(step, int) else None,
+                "step_key": str(step),
+                "seed": seed,
+                "file": filename,
+                "n_rows": len(rows),
+            }
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
         return path
 
     @staticmethod
@@ -1918,10 +1932,12 @@ class DiffusionARTLoss(DiffusionLossFn):
         cls._attach_batch_metrics(batch, batch_metrics, batch_size)
         sample_log_dir = algorithm_cfg.get("art_sample_log_dir", None)
         if sample_log_dir:
+            global_steps = batch.meta_info.get("global_steps")
             cls.write_sample_records(
                 str(sample_log_dir),
-                batch.meta_info.get("global_steps", f"uid{step_seed}"),
+                int(global_steps) if global_steps is not None else f"uid{step_seed}",
                 cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
+                seed=step_seed,
             )
 
         pool = num_steps - 1 if algorithm_cfg.get("art_exclude_final_step", True) and num_steps > 1 else num_steps

@@ -557,9 +557,46 @@ def test_prepare_actor_batch_writes_per_sample_records(tmp_path):
     assert set(rows[0]["reward_raw"]) == set(AV_NAMES) == set(rows[0]["reward_standardized"])
     assert rows[0]["reward_raw"]["clap"] == pytest.approx(0.5) and rows[0]["reward"] == pytest.approx(0.5)
     assert rows[0]["video_group_active"] is True and rows[0]["anchor"] == [False, False]
-    # Writer alone: deterministic file name and one line per row.
-    out = DiffusionARTLoss.write_sample_records(str(tmp_path / "w"), 3, [{"a": 1}, {"b": 2.5}])
+    index = [json.loads(line) for line in (tmp_path / "train_samples" / "index.jsonl").read_text().splitlines()]
+    assert index == [{"step": 7, "step_key": "7", "seed": 42 + 7, "file": "step_7.jsonl", "n_rows": 6}]
+    # Writer alone: deterministic file name, one line per row, index appended (uid-hash fallback keeps step null).
+    out = DiffusionARTLoss.write_sample_records(str(tmp_path / "w"), 3, [{"a": 1}, {"b": 2.5}], seed=45)
     assert out.endswith("step_3.jsonl") and pathlib.Path(out).read_text() == '{"a": 1}\n{"b": 2.5}\n'
+    DiffusionARTLoss.write_sample_records(str(tmp_path / "w"), "uid123", [{"a": 1}], seed=123)
+    index = [json.loads(line) for line in (tmp_path / "w" / "index.jsonl").read_text().splitlines()]
+    assert [(e["step"], e["step_key"], e["file"], e["n_rows"]) for e in index] == [
+        (3, "3", "step_3.jsonl", 2),
+        (None, "uid123", "step_uid123.jsonl", 1),
+    ]
+
+
+@pytest.mark.parametrize(
+    "trainer_module",
+    ["verl_omni.trainer.diffusion.ray_diffusion_trainer", "verl_omni.trainer.diffusion.v1.trainer_base"],
+)
+def test_trainers_attach_global_steps_before_preparing_the_actor_batch(trainer_module):
+    """The rollout union carries no step, so both direct-preference trainers set meta_info['global_steps']."""
+    import importlib
+
+    module = importlib.import_module(trainer_module)
+    trainer_cls = (
+        module.DirectPreferenceRayTrainer
+        if hasattr(module, "DirectPreferenceRayTrainer")
+        else module.PolicyGradientDiffusionTrainerV1
+    )
+    seen = {}
+
+    class StubLoss:
+        @staticmethod
+        def prepare_actor_batch(batch, reward_tensor, config):
+            seen["global_steps"] = batch.meta_info.get("global_steps")
+            seen["reward_shape"] = tuple(reward_tensor.shape)
+            return batch
+
+    fake_self = SimpleNamespace(global_steps=12, _loss_fn=StubLoss(), config=None)
+    batch = make_rollout_batch(["a", "a"])
+    trainer_cls._prepare_actor_batch(fake_self, batch, torch.tensor([[0.1], [0.2]]))
+    assert seen == {"global_steps": 12, "reward_shape": (2,)}
 
 
 def test_loss_reports_per_modality_policy_loss_and_flow_time_buckets():

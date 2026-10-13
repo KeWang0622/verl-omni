@@ -228,7 +228,10 @@ rollout sample: `sample`, `uid`, `group_index`, `prompt_index` (from
 `reward_raw` / `reward_standardized` per component (when components are
 available), `<modality>_routed`, `<modality>_group_active`, pairwise labels and
 `anchor` flags. No latents or media are written; the file is a few kB per step
-and enables paired per-prompt analyses against other runs at matched steps.
+and enables paired per-prompt analyses against other runs at matched steps. An
+`index.jsonl` in the same directory records `step`, `step_key`, `seed`, `file`
+and `n_rows` per write, so files stay orderable even if a trainer path did not
+attach `global_steps` and the uid-hash fallback named the file.
 
 ## Reference Examples
 
