@@ -249,3 +249,61 @@ def test_group_index_from_uid_numbers_prompts_by_first_appearance():
     group_index, num_groups = group_index_from_uid(np.array(["b", "a", "b", "c", "a"], dtype=object))
     assert group_index.tolist() == [0, 1, 0, 2, 1] and num_groups == 3
     assert group_index.dtype == torch.int64
+
+
+def test_guidance_damps_near_zero_reward_endpoint_correlation_like_the_reference():
+    """Reference ``historical`` direction mode: the covariance is scaled by the group's mean absolute centred reward
+    and divided by ``max(rms, eps)``. A group whose scaled covariance has RMS below ``eps`` therefore gets a damped
+    push (RMS < 1) instead of a unit-RMS push along what is mostly noise; ordinary groups are unit RMS."""
+    from verl_omni.trainer.diffusion.diffusion_art import art_guidance
+
+    generator = torch.Generator().manual_seed(3)
+    endpoints = torch.randn(8, 6, generator=generator)
+    endpoints[4:] = 1e-7 * torch.randn(
+        4, 6, generator=generator
+    )  # group 1: endpoints nearly identical -> tiny covariance
+    rewards = torch.tensor([0.1, 0.9, 0.3, 0.5, 0.1, 0.9, 0.3, 0.5])
+    groups = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1])
+    guidance, active = art_guidance(endpoints, rewards, groups, 2, eps=1e-5)
+    assert active.tolist() == [True, True]
+    rms = guidance.flatten(1).square().mean(dim=1).sqrt()
+    assert rms[0].item() == pytest.approx(1.0, rel=1e-5)
+    assert 0.0 < rms[1].item() < 1.0  # damped, not amplified
+    # Reference formula for the damped group: signal = cov / mad, direction = signal / clamp_min(rms(signal), eps).
+    centered = rewards[4:] - rewards[4:].mean()
+    covariance = (centered[:, None] * endpoints[4:]).mean(dim=0)
+    mad = centered.abs().mean()
+    signal = covariance / mad
+    expected = signal / signal.square().mean().sqrt().clamp_min(1e-5)
+    torch.testing.assert_close(guidance[1], expected.float(), rtol=1e-4, atol=1e-6)
+    # Direction of the ordinary group is unchanged by the scaling (cov / mad has the same direction as cov).
+    cov0 = ((rewards[:4] - rewards[:4].mean())[:, None] * endpoints[:4]).mean(dim=0)
+    torch.testing.assert_close(guidance[0], (cov0 / cov0.square().mean().sqrt()).float(), rtol=1e-4, atol=1e-6)
+
+
+def test_reference_drift_edge_handling_matches_the_reference():
+    """``t = 1`` band within ``atol=eps`` of 1, variance floored at ``eps**2``, and a non-forward step is an error."""
+    from verl_omni.trainer.diffusion.diffusion_art import art_reference_drift
+
+    energy = torch.full((3,), 0.01)
+    nu = 0.8
+    # 1 - 2e-6 is inside the eps=1e-5 band -> t=1 form: coefficient = h, variance = nu^2.
+    sigma = torch.tensor([1.0, 1.0 - 2e-6, 0.5])
+    sigma_next = torch.tensor([0.9, 0.9, 0.4])
+    drift = art_reference_drift(energy, sigma, sigma_next, nu)
+    h = sigma - sigma_next
+    expected_initial = h**2 * energy / (2 * nu**2)
+    torch.testing.assert_close(drift[:2], expected_initial[:2])
+    interior = (h[2] * (1 + 0.5 * nu**2)) ** 2 * energy[2] / (2 * nu**2 * 0.5 / 0.5 * h[2])
+    torch.testing.assert_close(drift[2], interior)
+    # Tiny variance is floored at eps**2 (not eps): a low-noise state with a tiny step (fp32 step used for the
+    # expectation so the check is about the floor, not about float rounding of the inputs).
+    s_tiny, s_tiny_next = torch.tensor([1e-3]), torch.tensor([1e-3 - 1e-7])
+    h_tiny = (s_tiny - s_tiny_next).double()
+    variance = nu**2 * 1e-3 / (1 - 1e-3) * h_tiny.item()
+    assert variance < 1e-10
+    tiny = art_reference_drift(torch.tensor([1.0]), s_tiny, s_tiny_next, nu)
+    expected_tiny = (h_tiny * (1 + 0.5 * nu**2)) ** 2 / (2 * 1e-10)
+    torch.testing.assert_close(tiny.double(), expected_tiny, rtol=1e-4, atol=0)
+    with pytest.raises(ValueError, match="sigma > sigma_next"):
+        art_reference_drift(energy, torch.tensor([0.5, 0.5, 0.5]), torch.tensor([0.5, 0.4, 0.6]), nu)

@@ -62,14 +62,17 @@ def art_guidance(
     group_index: torch.Tensor,
     num_groups: int,
     return_covariance_rms: bool = False,
+    eps: float = 1e-5,
 ) -> tuple[torch.Tensor, ...]:
     """Per-group reward-endpoint covariance normalised to unit RMS (paper Eq. 5).
 
     ``Cov(R, x0 | c) = 1/K sum_i (R_i - mean R)(x0_i - mean x0)`` over the ``K`` endpoints of
     prompt ``c``; the ``mean x0`` term vanishes because the centred rewards sum to zero. The
-    covariance is divided by its own RMS so every active prompt contributes a direction of
-    unit RMS, independent of the reward scale. A group yields zero guidance (and is marked
-    inactive) when it has a single sample, constant rewards, or an exactly zero covariance.
+    covariance, scaled by the group's mean absolute centred reward, is divided by its RMS (floored at
+    ``eps``) so every active prompt contributes a direction of unit RMS independent of the reward
+    scale, except that near-zero reward-endpoint correlations are damped rather than amplified (the
+    reference's ``historical`` direction mode). A group yields zero guidance (and is marked inactive)
+    when it has a single sample, constant rewards, or an exactly zero covariance.
 
     Args:
         endpoints: Clean final latents, ``(B, *latent_shape)``.
@@ -78,6 +81,8 @@ def art_guidance(
         num_groups: Number of prompts in the batch.
         return_covariance_rms: Also return the RMS of the raw covariance per group, ``(num_groups,)``
             float32 (the strength of the reward-endpoint correlation before normalisation; a diagnostic).
+        eps: Floor of the RMS normaliser applied to the reward-MAD-scaled covariance (reference default
+            ``1e-5``); groups below it receive a damped direction instead of a unit-RMS one.
 
     Returns:
         ``(guidance, active)``: ``guidance`` has shape ``(num_groups, *latent_shape)`` in
@@ -112,8 +117,18 @@ def art_guidance(
     covariance.index_add_(0, groups, centered.double()[:, None] * flat.double())
     covariance = covariance / safe_counts.double()[:, None]
     rms = covariance.square().mean(dim=1).sqrt()
-    active = (counts > 1) & ~constant & (rms > 0)
-    direction = covariance / torch.where(active, rms, torch.ones_like(rms))[:, None]
+    # Reference normalisation (vanzll/DiffusionART ``art_scalar_covariance``, ``direction_mode="historical"``): the
+    # covariance is first scaled by the group's mean absolute centred reward (MAD) and then divided by its RMS
+    # floored at ``eps``, so a group whose reward-scaled covariance is below ``eps`` RMS gets a *damped* push
+    # instead of a unit-RMS push along what is mostly noise. For every other group this equals ``cov / rms(cov)``.
+    mad = (
+        torch.zeros(num_groups, device=flat.device, dtype=torch.float64).index_add_(0, groups, centered.abs().double())
+        / safe_counts.double()
+    )
+    signal = covariance / torch.where(mad > 0, mad, torch.ones_like(mad))[:, None]
+    signal_rms = signal.square().mean(dim=1).sqrt()
+    active = (counts > 1) & ~constant & (mad > 0) & (signal_rms > 0)
+    direction = signal / signal_rms.clamp_min(eps)[:, None]
     direction = torch.where(active[:, None], direction, torch.zeros_like(direction)).float()
     guidance = direction.reshape(num_groups, *endpoints.shape[1:])
     if return_covariance_rms:
@@ -168,7 +183,7 @@ def art_reference_drift(
     sigma: torch.Tensor,
     sigma_next: torch.Tensor,
     reference_noise_level: float,
-    eps: float = 1e-6,
+    eps: float = 1e-5,
 ) -> torch.Tensor:
     """Per-coordinate KL proxy between the current and old reference SDE transitions (Eq. 7, App. C.2).
 
@@ -184,18 +199,26 @@ def art_reference_drift(
         sigma: Flow time ``t`` in ``(0, 1]`` of every state, ``(B,)``.
         sigma_next: Flow time of the next ODE state (``0`` for the last step), ``(B,)``.
         reference_noise_level: ``nu`` of the reference SDE (paper default ``0.8``).
-        eps: Floor for ``1 - t`` and the variance.
+        eps: Tolerance of the ``t = 1`` band, floor for ``1 - t``, and square-root floor of the variance
+            (reference default ``1e-5``).
+
+    Raises:
+        ValueError: if any ``sigma - sigma_next`` is not a positive finite step.
 
     Returns:
         ``(B,)`` drift scores ``m(s_t)``.
     """
     nu2 = float(reference_noise_level) ** 2
     sigma = sigma.float()
-    step = (sigma - sigma_next.float()).clamp_min(eps)
-    initial = sigma >= 1.0 - eps
+    step = sigma - sigma_next.float()
+    if not torch.isfinite(step).all() or bool((step <= 0).any()):
+        raise ValueError("art_reference_drift needs sigma > sigma_next for every item (a forward ODE step).")
+    # Reference edge handling (vanzll ``art_loss``): the ``t = 1`` form applies within ``atol=eps`` of 1, the
+    # variance is floored at ``eps**2`` (a std floor of ``eps``), and ``1 - t`` is floored at ``eps``.
+    initial = torch.isclose(sigma, torch.ones_like(sigma), atol=eps, rtol=0.0)
     coefficient = torch.where(initial, step, step * (1.0 + 0.5 * nu2))
     variance = torch.where(initial, torch.full_like(sigma, nu2), nu2 * sigma / (1.0 - sigma).clamp_min(eps) * step)
-    return coefficient.square() * movement_energy.float() / (2.0 * variance.clamp_min(eps))
+    return coefficient.square() * movement_energy.float() / (2.0 * variance.clamp_min(eps**2))
 
 
 def art_loss(

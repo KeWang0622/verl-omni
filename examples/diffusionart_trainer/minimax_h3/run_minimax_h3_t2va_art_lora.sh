@@ -7,6 +7,8 @@
 # H3 Euler sampler), every visited state regressed toward v_old - G(c) with the per-prompt covariance guidance,
 # two disjoint updates per rollout batch (ppo_mini_batch_size = train_batch_size / 2), no EMA/KL/likelihoods.
 # Video and audio keep their own sigma grids (shift 12 / shift 3); the loss uses each modality's flow time.
+# Defaults match the DiffusionNFT recipe (ROLLOUT_N=16); our 8xB200 comparison runs set ROLLOUT_N=8 on both arms to halve the
+# rollout cost — pass ROLLOUT_N explicitly when reproducing them.
 set -x
 
 export WANDB_MODE=${WANDB_MODE:-offline}
@@ -33,7 +35,7 @@ if ((ROLLOUT_TP < 1 || ROLLOUT_USP < 1 || ROLLOUT_RING < 1 || NUM_GPUS % ROLLOUT
   echo "NUM_GPUS must be divisible by a positive TP * USP * Ring group size." >&2
   exit 1
 fi
-ROLLOUT_N=${ROLLOUT_N:-8}
+ROLLOUT_N=${ROLLOUT_N:-16}
 TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-1000}
 HEIGHT=${HEIGHT:-256}
 WIDTH=${WIDTH:-384}

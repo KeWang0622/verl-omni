@@ -1526,11 +1526,10 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             "t_expanded": t_expanded,
         }
 
-    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
-        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
-            micro_batch=micro_batch, step=step
-        )
-
+    def _adapter_predictions(self, model_inputs, negative_model_inputs, *, reference: bool):
+        """``(old, current, reference)`` velocities at one state: the frozen ``old`` adapter (no grad), the trainable
+        ``default`` adapter (grad), and, when ``reference`` is set, the base model with adapters disabled (no grad);
+        the active adapter is ``default`` afterwards. Shared by the NFT and ART engines."""
         with self.use_adapter("old"), torch.no_grad():
             old_prediction = forward(
                 module=self.module,
@@ -1546,15 +1545,26 @@ class NFTDiffusersFSDPEngine(DiffusersFSDPEngine):
             negative_model_inputs=negative_model_inputs,
         )
 
-        with torch.no_grad():
-            with self.disable_adapter():
-                ref_forward_prediction = forward(
-                    module=self.module,
-                    model_config=self.model_config,
-                    model_inputs=model_inputs,
-                    negative_model_inputs=negative_model_inputs,
-                ).detach()
-        self._set_adapter("default")
+        ref_forward_prediction = None
+        if reference:
+            with torch.no_grad():
+                with self.disable_adapter():
+                    ref_forward_prediction = forward(
+                        module=self.module,
+                        model_config=self.model_config,
+                        model_inputs=model_inputs,
+                        negative_model_inputs=negative_model_inputs,
+                    ).detach()
+            self._set_adapter("default")
+        return old_prediction, forward_prediction, ref_forward_prediction
+
+    def forward_step(self, micro_batch: TensorDict, loss_function, forward_only, step):
+        model_inputs, negative_model_inputs, x0, xt, t_expanded = self.prepare_model_inputs(
+            micro_batch=micro_batch, step=step
+        )
+        old_prediction, forward_prediction, ref_forward_prediction = self._adapter_predictions(
+            model_inputs, negative_model_inputs, reference=True
+        )
 
         model_output = self.prepare_model_outputs(
             output=(old_prediction, forward_prediction, ref_forward_prediction, x0, xt, t_expanded),
@@ -1666,32 +1676,18 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
         model_inputs, negative_model_inputs, _, xt, t_expanded = self.prepare_model_inputs(
             micro_batch=micro_batch, step=step
         )
-
-        with self.use_adapter("old"), torch.no_grad():
-            old_prediction = forward(
-                module=self.module,
-                model_config=self.model_config,
-                model_inputs=model_inputs,
-                negative_model_inputs=negative_model_inputs,
-            ).detach()
-
-        forward_prediction = forward(
-            module=self.module,
-            model_config=self.model_config,
-            model_inputs=model_inputs,
-            negative_model_inputs=negative_model_inputs,
+        # No reference forward: DiffusionART has no KL term.
+        old_prediction, forward_prediction, _ = self._adapter_predictions(
+            model_inputs, negative_model_inputs, reference=False
         )
-        self._set_adapter("default")
 
         model_output = self.prepare_model_outputs(
             output=(old_prediction, forward_prediction, xt, t_expanded), micro_batch=micro_batch
         )
 
         if loss_function is not None:
-            # Explicit default: the pinned verl's get_non_tensor_data has a required `default` argument.
-            num_train_timesteps = tu.get_non_tensor_data(micro_batch, "num_train_timesteps", None)
-            if num_train_timesteps is None:
-                num_train_timesteps = self._num_train_timesteps()
+            # prepare_model_inputs -> _flow_time stored num_train_timesteps on this micro batch.
+            num_train_timesteps = tu.get_non_tensor_data(micro_batch, "num_train_timesteps", default=None)
             loss_inputs = self.art_loss_inputs(micro_batch, step, xt, t_expanded, int(num_train_timesteps))
             data = tu.get_tensordict(loss_inputs)
             tu.assign_non_tensor(

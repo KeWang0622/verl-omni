@@ -627,6 +627,7 @@ algorithm:
   art_exclude_final_step: true
   art_log_rollout_velocity_gap: false
   art_modality_reward_weights: null
+  art_sample_log_dir: null
   paired_preference: false
   rollout_correction:
     _target_: verl.trainer.config.algorithm.RolloutCorrectionConfig

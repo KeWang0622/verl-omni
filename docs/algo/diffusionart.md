@@ -91,7 +91,7 @@ states instead of re-noised endpoints.
 | Layer | What it does | Code |
 |---|---|---|
 | Math | `art_guidance`, `art_pairwise_labels`, `art_reference_drift`, `art_loss` (pure tensors). | `verl_omni/trainer/diffusion/diffusion_art.py` |
-| Rollout adapters | Deterministic rollouts with the `old` adapter that keep every visited fp32 state: Qwen-Image (`all_latents` with `T + 1` entries) and LTX-2.3 text-to-audio-video (`all_latents` + `all_next_latents` over the unified `[video \| audio]` tokens, `video_seq_len`). | `verl_omni/pipelines/qwen_image_diffusion_art/`, `verl_omni/pipelines/ltx2_diffusion_art/` |
+| Rollout adapters | Deterministic rollouts with the `old` adapter that keep every visited fp32 state: Qwen-Image (`all_latents` with `T + 1` entries), LTX-2.3 text-to-audio-video (`all_latents` + `all_next_latents` over the unified `[video \| audio]` tokens, `video_seq_len`) and MiniMax-H3 text-to-audio-video (the official Euler sampler with every state recorded: `all_latents` with `T + 1` entries as width-32 tokens `[video rows x3 \| audio rows]`, `video_seq_len`, and `all_segment_timesteps` because H3 denoises video and audio on different sigma grids). | `verl_omni/pipelines/qwen_image_diffusion_art/`, `verl_omni/pipelines/ltx2_diffusion_art/`, `verl_omni/pipelines/minimax_h3_diffusion_art/` |
 | Batch preparation | Computes `G(c)` per `uid` (per modality for audio-video latents) from the endpoints and rewards, draws the states to train from the first `T - 1` ODE positions (`algorithm.art_exclude_final_step`, as in the paper's recipes) times `algorithm.timestep_fraction`, writes `train_latents`, `train_timesteps`, `train_timesteps_next`, `art_guidance` (+ `art_anchor`, `train_latents_next`); drops the raw trajectory. | `DiffusionARTLoss.prepare_actor_batch` |
 | Actor loss | Trust-region-masked frozen-target MSE, `1/\|B\|` average with masked items in the denominator; per-modality losses combined with `art_video_weight` / `art_audio_weight`. | `DiffusionARTLoss` in `verl_omni/trainer/diffusion/diffusion_algos.py` |
 | FSDP engine | `diffusion_art_model`: `old`-adapter and current velocities at `(train_latents[:, s], train_timesteps[:, s])`; no reference forward. | `ARTDiffusersFSDPEngine` in `verl_omni/workers/engine/fsdp/diffusers_impl.py` |
@@ -134,9 +134,11 @@ paper's on-policy, EMA-free setting.
   recomputed with the `old` adapter on the training side (see above).
 - Only the `velocity_linear_sigma` and `velocity_uniform` loss weightings are
   implemented; the reference also offers an `x0`-space variant.
-- Qwen-Image and LTX-2.3 (text-to-audio-video only) adapter pairs are
-  registered. Other architectures follow the same pattern (a thin subclass per
-  architecture).
+- Qwen-Image, LTX-2.3 (text-to-audio-video only) and MiniMax-H3 (text-to-audio-video
+  only) adapter pairs are registered. Other architectures follow the same pattern (a
+  thin subclass per architecture). For H3 the loss takes a per-segment flow time
+  (`segment_sigma`, from the rollout's `all_segment_timesteps`) so the trust-region
+  mask and the `t` weighting use each modality's own sigma.
 - The paper selects a per-trajectory random subset of ODE positions; here
   `algorithm.timestep_fraction < 1` subsamples the visited states per row with
   DiffusionNFT's permutation helper, reseeded every rollout with
@@ -237,6 +239,14 @@ from the per-sample `global_steps` field the rollout strategy adds to the batch
 TensorDict and would collide).
 
 ## Reference Examples
+
+[`examples/diffusionart_trainer/minimax_h3/run_minimax_h3_t2va_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/minimax_h3/run_minimax_h3_t2va_art_lora.sh)
+is the DiffusionNFT MiniMax-H3 text-to-audio-video recipe with only the algorithm
+swapped (same data, CLAP + ImageBind rewards, LoRA, learning rate, rollout and
+validation settings), for a like-for-like comparison; it is WIP. With CLAP +
+ImageBind alone — neither sees the picture — ART reaches a higher reward than
+DiffusionNFT by darkening and freezing the video; pair it with a visual reward
+(VideoAlign / HPSv3) before reading the reward as quality.
 
 [`examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh)
 post-trains LTX-2.3 text-to-audio-video with LoRA on the OmniNFT reward set

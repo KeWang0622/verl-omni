@@ -138,15 +138,19 @@ Visit our [documentation](https://verl-omni.readthedocs.io/en/latest/index.html)
     <td>WIP</td>
   </tr>
   <tr>
-    <td rowspan="2"><b>MiniMax-H3</b></td>
-    <td rowspan="2">Diffusion generator</td>
-    <td rowspan="2">Any → Video + Audio</td>
+    <td rowspan="3"><b>MiniMax-H3</b></td>
+    <td rowspan="3">Diffusion generator</td>
+    <td rowspan="3">Any → Video + Audio</td>
     <td>DiffusionNFT</td>
     <td>✅</td>
   </tr>
   <tr>
     <td>FlowGRPO</td>
     <td>✅</td>
+  </tr>
+  <tr>
+    <td>DiffusionART</td>
+    <td>WIP</td>
   </tr>
   <tr>
     <td rowspan="2"><b>Boogu-Image</b></td>

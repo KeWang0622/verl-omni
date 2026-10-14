@@ -86,4 +86,8 @@ run_test 12 "DiffusionART v1 sync trainer e2e" \
     env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
     bash tests/special_e2e/run_diffusionart_qwen_image.sh "${diffusion_trainer_args[@]}"
 
+run_test 13 "MiniMax-H3 DiffusionART T2VA v1 sync trainer e2e" \
+    env CUDA_VISIBLE_DEVICES="${CUDA_DEVICE_LIST}" NUM_GPUS="${NUM_GPUS}" \
+    TOTAL_TRAINING_STEPS=1 python3 tests/special_e2e/run_flowgrpo_minimax_h3_tiny.py --task t2va --algorithm diffusion_art
+
 gpu_smoke_summary

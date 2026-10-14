@@ -1252,11 +1252,8 @@ class DGPOLoss(DiffusionLossFn):
 
     @staticmethod
     def _first_appearance_index(uid: np.ndarray) -> np.ndarray:
-        """Number groups 0, 1, ... in the order their uid first appears."""
-        _, first, inverse = np.unique(uid, return_index=True, return_inverse=True)
-        rank = np.empty_like(first)
-        rank[np.argsort(first, kind="stable")] = np.arange(first.size)
-        return rank[inverse.reshape(-1)]
+        """Number groups 0, 1, ... in the order their uid first appears (shared with DiffusionART)."""
+        return group_index_from_uid(uid)[0].numpy()
 
     @staticmethod
     def _select_shared_timesteps(
@@ -1603,12 +1600,9 @@ class DiffusionARTLoss(DiffusionLossFn):
         return path
 
     @staticmethod
-    def _component_matrix(batch: DataProto, reward_tensor: torch.Tensor) -> Optional[tuple[torch.Tensor, list[str]]]:
-        """Raw per-component scores ``(B, K)`` and their names, from ``rm_scores`` + ``reward_names`` (component
-        mode) or from the ``reward/<name>`` extra infos of the weighted-sum manager; ``None`` when neither exists."""
-        reward_names = batch.meta_info.get("reward_names")
-        if reward_tensor.ndim == 2 and reward_names is not None:
-            return reward_tensor.detach().float().cpu(), list(reward_names)
+    def _component_matrix(batch: DataProto) -> Optional[tuple[torch.Tensor, list[str]]]:
+        """Raw per-component scores ``(B, K)`` and their names from the ``reward/<name>`` extra infos the
+        weighted-sum reward manager attaches; ``None`` when the batch carries no component scores."""
         names = sorted(
             key[len("reward/") :]
             for key in batch.non_tensor_batch
@@ -1665,6 +1659,12 @@ class DiffusionARTLoss(DiffusionLossFn):
             problems.append("actor_rollout_ref.actor.use_kl_loss must be False (DiffusionART has no KL term)")
         if actor_cfg.get("enable_timestep_staging", False):
             problems.append("actor_rollout_ref.actor.enable_timestep_staging must be False")
+        if bool(algorithm_cfg.get("paired_preference", False)):
+            problems.append(
+                "algorithm.paired_preference must be False (the trainers double the mini batch for it, which the "
+                "per-rank micro-batching check below does not model; DiffusionART's pairwise variant is "
+                "algorithm.art_pairwise_reward)"
+            )
         for key in ("guidance_scale", "true_cfg_scale", "video_cfg_scale", "audio_cfg_scale"):
             model_value = OmegaConf.select(config, f"actor_rollout_ref.model.pipeline.{key}", default=None)
             rollout_value = OmegaConf.select(config, f"actor_rollout_ref.rollout.pipeline.{key}", default=None)
@@ -1821,16 +1821,13 @@ class DiffusionARTLoss(DiffusionLossFn):
 
     @staticmethod
     def _component_scores(batch: DataProto, name: str) -> torch.Tensor:
-        """Per-sample score of one named reward, from the reward-manager extra infos or ``rm_scores``."""
+        """Per-sample score of one named reward from the reward-manager ``reward/<name>`` extra infos."""
         key = f"reward/{name}"
         if key in batch.non_tensor_batch:
             return torch.as_tensor(np.asarray(batch.non_tensor_batch[key], dtype=np.float32)).reshape(-1)
-        reward_names = batch.meta_info.get("reward_names")
-        if "rm_scores" in batch.batch.keys() and reward_names is not None and name in list(reward_names):
-            return batch.batch["rm_scores"].detach().float().cpu()[:, list(reward_names).index(name)]
         raise ValueError(
             f"DiffusionART modality routing needs per-component scores for reward {name!r}: `reward/{name}` in the "
-            "batch extra infos or `rm_scores` with meta_info.reward_names."
+            "batch extra infos (the weighted-sum reward manager attaches them)."
         )
 
     @classmethod
@@ -1904,9 +1901,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         """Turn ODE rollouts into DiffusionART actor tensors: cached states, schedule and per-prompt guidance.
 
         Requires the full trajectory from a ``diffusion_art`` rollout adapter (see ``_trajectory``).
-        ``reward_tensor`` is the ``(B,)`` scalar reward, or the ``(B, K)`` component matrix when the reward
-        manager runs with ``aggregation=preserve_components``; in that case the columns feed the modality
-        routing and their unweighted sum is the scalar used for the logging tensors.
+        ``reward_tensor`` is the ``(B,)`` scalar reward of the weighted-sum reward manager; per-component scores
+        for the modality routing and the ``reward/<name>`` summaries come from its ``reward/<name>`` extra infos.
         Writes ``train_latents`` ``(B, S, *latent)``, ``train_timesteps`` / ``train_timesteps_next``
         ``(B, S)`` (``S`` states per rollout drawn from the first ``T - 1`` ODE positions by default,
         ``algorithm.art_exclude_final_step``, times ``algorithm.timestep_fraction``, reseeded per rollout
@@ -1928,19 +1924,11 @@ class DiffusionARTLoss(DiffusionLossFn):
             if key not in batch.batch.keys():
                 raise ValueError(f"DiffusionART actor batch requires `{key}` from the diffusion_art rollout adapter.")
         batch_metrics: dict[str, Any] = {}
-        components = cls._component_matrix(batch, reward_tensor)
+        if reward_tensor.ndim != 1:
+            raise ValueError(f"DiffusionART expects a (B,) reward tensor, got {tuple(reward_tensor.shape)}.")
+        components = cls._component_matrix(batch)
         if components is not None:
             batch_metrics.update(cls.reward_summaries(*components))
-        if reward_tensor.ndim == 2:
-            # reward.aggregation=preserve_components hands over the [B, K] component matrix (columns follow
-            # meta_info["reward_names"]); routing reads the columns, the unweighted total is the logging scalar.
-            if batch.meta_info.get("reward_names") is None:
-                raise ValueError("DiffusionART received a 2-D reward tensor without meta_info['reward_names'].")
-            if "rm_scores" not in batch.batch.keys():
-                batch.batch["rm_scores"] = reward_tensor.detach().float()
-            reward_tensor = reward_tensor.sum(dim=1)
-        elif reward_tensor.ndim != 1:
-            raise ValueError(f"DiffusionART expects a (B,) or (B, K) reward tensor, got {tuple(reward_tensor.shape)}.")
         states, next_states, all_timesteps = cls._trajectory(batch)
         batch_size, num_steps = all_timesteps.shape
         endpoints = next_states[:, -1].float()
@@ -1994,12 +1982,15 @@ class DiffusionARTLoss(DiffusionLossFn):
         sample_log_dir = algorithm_cfg.get("art_sample_log_dir", None)
         if sample_log_dir:
             global_steps = cls._global_step(batch)
-            cls.write_sample_records(
-                str(sample_log_dir),
-                global_steps if global_steps is not None else f"uid{step_seed}",
-                cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
-                seed=step_seed,
-            )
+            try:
+                cls.write_sample_records(
+                    str(sample_log_dir),
+                    global_steps if global_steps is not None else f"uid{step_seed}",
+                    cls._sample_records(batch, reward_tensor, group_index, components, standardized, records, anchors),
+                    seed=step_seed,
+                )
+            except OSError as exc:  # diagnostics must never abort a training step
+                logger.warning("DiffusionART: could not write per-sample records to %s: %s", sample_log_dir, exc)
 
         pool = num_steps - 1 if algorithm_cfg.get("art_exclude_final_step", True) and num_steps > 1 else num_steps
         # Fresh random subset of ODE positions per rollout batch (paper Algorithm 1); DiffusionNFT reseeds the same

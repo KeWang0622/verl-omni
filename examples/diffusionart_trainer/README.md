@@ -18,13 +18,13 @@ schedule and no KL term.
 > run yet. The recipes below are the planned configurations and will be updated
 > with curves once they have run. See [Validation status](#validation-status).
 
-Two recipes:
+Three recipes:
 
 - Qwen-Image OCR (below), the repository's standard smoke task.
 - LTX-2.3 text-to-audio-video,
   [`ltx2/run_ltx2_t2av_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/ltx2/run_ltx2_t2av_art_lora.sh)
   (a shell script with explicit hydra overrides, like the other recipes in this repository):
-  the OmniNFT LTX-2.3 recipe (PR #640; same VGGSound prompts, five rewards and
+  the OmniNFT LTX-2.3 setting (same VGGSound prompts, five rewards and
   routing weights, LoRA r32/alpha64, lr 3e-5, 32 prompts x 8 samples,
   256x384x121 frames, 20 rollout steps, 150 steps) with only the algorithm
   changed, for a like-for-like comparison. Guidance is computed per modality
@@ -35,8 +35,19 @@ Two recipes:
   native VideoAlign / HPSv3 / AudioBox / CLAP / DeSync scorers it uses are on
   main since #663 part 1; ART reads their per-component `reward/<name>` scores
   under the default `weighted_sum` aggregation, so it does not need
-  `preserve_components` (still pending #664). Model and data asset preparation
-  follows the OmniNFT recipe (PR #640).
+  `preserve_components` (still pending #664). Model and data assets: the LTX-2.3
+  Diffusers checkpoint and the VGGSound caption parquet are prepared as in the
+  in-repo LTX-2.3 FlowGRPO example
+  ([`examples/flowgrpo_trainer/ltx2/README.md`](../flowgrpo_trainer/ltx2/README.md));
+  the five native scorers load their public checkpoints from `REWARD_ROOT`
+  (VideoReward, HPSv3, Qwen2-VL-2B/7B, audiobox-aesthetics, CLAP `clap-htsat-unfused`,
+  Synchformer) as listed in the script header.
+- MiniMax-H3 text-to-audio-video,
+  [`minimax_h3/run_minimax_h3_t2va_art_lora.sh`](https://github.com/verl-project/verl-omni/blob/main/examples/diffusionart_trainer/minimax_h3/run_minimax_h3_t2va_art_lora.sh):
+  the DiffusionNFT MiniMax-H3 recipe with only the algorithm swapped (CLAP +
+  ImageBind, README VidProM split, LoRA r64/alpha128, lr 3e-4, 10-step rollouts). H3
+  denoises video and audio on different sigma grids, so the rollout also publishes
+  `all_segment_timesteps` and the loss uses each modality's own flow time.
 
 ## Installation
 

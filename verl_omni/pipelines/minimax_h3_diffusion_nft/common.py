@@ -256,12 +256,8 @@ def ref2va_reference_image_short_edge(value: int | str | None = None) -> Iterato
     """Temporarily apply the Ref2VA image size while serializing concurrent requests."""
     short_edge = validate_ref2va_reference_image_short_edge(value)
 
+    import vllm_omni.model_executor.models.minimax_h3.encoder_processing as _h3_encoder_processing
     from vllm_omni.model_executor.models.minimax_h3 import preprocessing as _h3_preprocessing
-
-    try:
-        import vllm_omni.model_executor.models.minimax_h3.encoder_processing as _h3_encoder_processing
-    except ImportError:  # older vLLM-Omni builds resolve the reference shape in `preprocessing` only
-        _h3_encoder_processing = None
 
     def _scaled_shape(image: Any) -> tuple[int, int]:
         width, height = image.size

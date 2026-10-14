@@ -417,27 +417,6 @@ def test_prepare_actor_batch_routes_rewards_per_modality_for_audio_video_latents
     assert "all_next_latents" not in result.batch.keys() and "all_latents" not in result.batch.keys()
 
 
-def test_prepare_actor_batch_accepts_component_matrix_rewards():
-    """reward.aggregation=preserve_components: rm_scores [B, K] arrives as the reward tensor (OmniNFT base)."""
-    uid = ["a", "a", "a", "b", "b", "b"]
-    batch = make_av_rollout_batch(uid)
-    names = ["clap", "desync", "video_align"]
-    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in names], dim=1)
-    for n in names:
-        del batch.non_tensor_batch[f"reward/{n}"]
-    batch.batch["rm_scores"] = matrix.clone()
-    batch.meta_info["reward_names"] = names
-    routing = {"video": {"video_align": 1.0, "desync": 1.0}, "audio": {"clap": 1.0, "desync": 1.0}}
-    result = DiffusionARTLoss.prepare_actor_batch(batch, matrix, make_config(art_modality_reward_weights=routing))
-    assert result.batch["advantages"].shape == (6, 4)
-    torch.testing.assert_close(result.batch["sample_level_rewards"][:, 0], matrix.sum(dim=1))
-    guidance = result.batch["art_guidance"]
-    torch.testing.assert_close(guidance[:, :5].flatten(1).square().mean(dim=1).sqrt(), torch.ones(6))
-    with pytest.raises(ValueError, match="reward_names"):
-        bad = make_av_rollout_batch(uid)
-        DiffusionARTLoss.prepare_actor_batch(bad, matrix, make_config(art_modality_reward_weights=routing))
-
-
 OMNINFT_REWARD_METRIC_SUFFIXES = ("mean", "std", "min", "max")
 AV_NAMES = ["clap", "desync", "video_align"]
 
@@ -498,18 +477,20 @@ def test_prepare_actor_batch_attaches_omninft_reward_summaries_and_art_guidance_
     assert "actor/video/covariance_rms" in metrics and "actor/audio/inactive_group_frac" in metrics
 
 
-def test_prepare_actor_batch_reward_summaries_from_component_matrix_and_inactive_groups():
+def test_prepare_actor_batch_reward_summaries_and_inactive_groups():
+    """Component summaries come from the reward/<name> extras; a constant-reward prompt is an inactive group."""
     uid = ["a", "a", "a", "b", "b", "b"]
     batch = make_av_rollout_batch(uid)
-    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in AV_NAMES], dim=1)
-    matrix[3:, :] = 0.5  # prompt b: constant rewards -> inactive group
     for n in AV_NAMES:
-        del batch.non_tensor_batch[f"reward/{n}"]
-    batch.batch["rm_scores"] = matrix.clone()
-    batch.meta_info["reward_names"] = AV_NAMES
+        scores = np.asarray(batch.non_tensor_batch[f"reward/{n}"], dtype=np.float32).copy()
+        scores[3:] = 0.5  # prompt b: constant rewards -> inactive group
+        batch.non_tensor_batch[f"reward/{n}"] = scores
+    matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in AV_NAMES], dim=1)
     prefix = DiffusionARTLoss.batch_metric_prefix
     result = DiffusionARTLoss.prepare_actor_batch(
-        batch, matrix, make_config(art_modality_reward_weights={"video": {"video_align": 1.0}, "audio": {"clap": 1.0}})
+        batch,
+        matrix.sum(dim=1),
+        make_config(art_modality_reward_weights={"video": {"video_align": 1.0}, "audio": {"clap": 1.0}}),
     )
     assert attached_metric_names(result) == expected_reward_metric_keys(AV_NAMES) | expected_guidance_metric_keys(
         ["video", "audio"]
@@ -517,6 +498,9 @@ def test_prepare_actor_batch_reward_summaries_from_component_matrix_and_inactive
     torch.testing.assert_close(result.batch[f"{prefix}reward/sum/std"], matrix.sum(dim=1).std(correction=0).expand(6))
     assert result.batch[f"{prefix}video/inactive_group_frac"][0] == pytest.approx(0.5)
     assert result.batch[f"{prefix}video/routed_reward_std"][0] > 0
+    # A 2-D reward tensor is not a supported input (no preserve_components path in this tree).
+    with pytest.raises(ValueError, match=r"\(B,\) reward tensor"):
+        DiffusionARTLoss.prepare_actor_batch(make_av_rollout_batch(uid), matrix, make_config())
     # Single-modality batch without component infos: only the modality-free guidance stats are attached.
     plain = DiffusionARTLoss.prepare_actor_batch(
         make_rollout_batch(["a", "a"]), torch.tensor([0.0, 1.0]), make_config()
@@ -579,7 +563,6 @@ def make_post_rollout_av_batch(uid, step=3):
     matrix = torch.stack([torch.as_tensor(batch.non_tensor_batch[f"reward/{n}"]) for n in names], dim=1)
     extra = DataProto.from_dict(
         tensors={
-            "rm_scores": matrix.clone(),
             "prompt_embeds": torch.zeros(batch_size, 7, 8),
             "audio": torch.zeros(batch_size, 2400),
             "audio_sample_rate": torch.full((batch_size,), 24000),
@@ -605,7 +588,7 @@ def test_prepared_batch_converts_to_the_worker_tensordict(tmp_path):
 
     batch, matrix = make_post_rollout_av_batch(["a", "a", "a", "b", "b", "b"], step=3)
     result = DiffusionARTLoss.prepare_actor_batch(
-        batch, matrix, make_config(art_log_rollout_velocity_gap=True, art_sample_log_dir=str(tmp_path))
+        batch, matrix.sum(dim=1), make_config(art_log_rollout_velocity_gap=True, art_sample_log_dir=str(tmp_path))
     )
     td = _to_diffusion_worker_tensordict(result)
     assert "art_guidance" in td.keys() and "train_latents_next" in td.keys()
@@ -952,3 +935,11 @@ def test_prepare_actor_batch_gathers_per_segment_timesteps():
         bad.batch["all_segment_timesteps"] = torch.zeros(4, 5, 3)
         bad.batch["video_seq_len"] = torch.full((4,), 2, dtype=torch.long)
         DiffusionARTLoss.prepare_actor_batch(bad, torch.tensor([0.1, 0.9, 0.3, 0.5]), make_config())
+
+
+def test_validate_trainer_config_rejects_paired_preference():
+    """The trainers double the mini batch for algorithm.paired_preference, which the per-rank micro-batching check
+    does not model; DiffusionART's pairwise variant is algorithm.art_pairwise_reward."""
+    config = compose_trainer_config(ART_OVERRIDES + ["algorithm.paired_preference=true"])
+    with pytest.raises(ValueError, match="paired_preference"):
+        DiffusionARTLoss.validate_trainer_config(config)

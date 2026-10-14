@@ -315,3 +315,105 @@ class TestRolloutAdapter:
         assert pipe._nft_capture["condition_video_rows"].shape == (0, VIDEO_ROW_WIDTH)
         with pytest.raises(NotImplementedError, match="text-to-audio-video"):
             pipe.diffuse(task="fl2va")
+
+
+class TestRolloutForwardMergePath:
+    """Drive the real ``MiniMaxH3DiffusionARTPipeline.forward`` over a mocked DiffusionNFT forward that returns the
+    #557 named-artifact envelope, so the trajectory merge, the training/validation switch and the untouched media
+    contract are exercised end to end."""
+
+    @staticmethod
+    def _nft_envelope(pipeline, rows, arows):
+        pytest.importorskip("vllm_omni")
+        from vllm_omni.diffusion.data import DiffusionOutput
+
+        from verl_omni.pipelines.diffusion_rollout_output import with_batched_media_artifacts, with_rollout_data
+        from verl_omni.pipelines.rollout_media import MediaSpec
+
+        video = torch.zeros(1, 3, 4, 6, 3, dtype=torch.uint8)  # [B, T, H, W, C]
+        audio = torch.zeros(1, 2, 64)
+        base = with_rollout_data(
+            DiffusionOutput(output=(video, audio)),
+            prompt_embeddings={"prompt_embeds": torch.zeros(1, 3, 8), "prompt_embeds_mask": torch.ones(1, 3)},
+            rl={
+                "latents_clean": torch.zeros(1, rows * VIDEO_ROW_WIDTH + arows * AUDIO_ROW_WIDTH),
+                "latent_meta": torch.tensor([[rows, arows, 1, 4, 4, 3]]),
+                "prompt_token_tags": torch.zeros(1, 3, dtype=torch.long),
+            },
+            to_cpu=True,
+        )
+        return with_batched_media_artifacts(
+            base,
+            data={"video_preview": video, "audio": audio},
+            specs={
+                "video_preview": MediaSpec("video", "decoded", "THWC", fps=24.0),
+                "audio": MediaSpec("audio", "decoded", "CT", sample_rate=32000),
+            },
+            primary="video_preview",
+            preview="video_preview",
+            audio="audio",
+            context="test",
+        )
+
+    def _pipeline(self, monkeypatch, rows, arows, trajectory):
+        from verl_omni.pipelines.minimax_h3_diffusion_art.vllm_omni_rollout_adapter import (
+            MiniMaxH3DiffusionARTPipeline,
+        )
+        from verl_omni.pipelines.minimax_h3_diffusion_nft.vllm_omni_rollout_adapter import (
+            MiniMaxH3DiffusionNFTPipeline,
+        )
+
+        pipe = MiniMaxH3DiffusionARTPipeline.__new__(MiniMaxH3DiffusionARTPipeline)
+        pipe._art_capture_enabled = False
+        pipe._art_trajectory = None
+        seen = {}
+
+        def fake_nft_forward(self, request):
+            seen["capture_enabled"] = self._art_capture_enabled
+            if self._art_capture_enabled:
+                self._art_trajectory = dict(trajectory)  # what ``diffuse`` records on a training request
+            return TestRolloutForwardMergePath._nft_envelope(self, rows, arows)
+
+        monkeypatch.setattr(MiniMaxH3DiffusionNFTPipeline, "forward", fake_nft_forward)
+        return pipe, seen
+
+    def test_training_request_merges_the_trajectory_and_keeps_the_media_contract(self, monkeypatch):
+        rows, arows = 4, 6
+        trajectory = {
+            "all_latents": torch.randn(1, 3, 3 * rows + arows, ART_ROW_WIDTH),
+            "all_timesteps": torch.tensor([[1000.0, 900.0]]),
+            "all_segment_timesteps": torch.tensor([[[1000.0, 1000.0], [900.0, 800.0]]]),
+            "video_seq_len": torch.tensor([3 * rows]),
+        }
+        pipe, seen = self._pipeline(monkeypatch, rows, arows, trajectory)
+        request = SimpleNamespace(sampling_params=SimpleNamespace(extra_args={"global_steps": 7}))
+        output = pipe.forward(request)
+        assert seen["capture_enabled"] is True and pipe._art_capture_enabled is False and pipe._art_trajectory is None
+        rl = output.output["metadata"]["rl"]
+        for key, value in trajectory.items():
+            torch.testing.assert_close(rl[key], value)
+        assert rl["latent_meta"].tolist() == [[rows, arows, 1, 4, 4, 3]]  # NFT fields preserved
+        header = output.output["metadata"]["media_artifacts"]
+        assert header["primary"] == "video_preview" and header["audio"] == "audio"
+        assert header["specs"]["video_preview"]["fps"] == 24.0 and header["specs"]["audio"]["sample_rate"] == 32000
+        assert "prompt_embeddings" in output.output["metadata"]
+
+    def test_validation_request_runs_the_plain_nft_path(self, monkeypatch):
+        pipe, seen = self._pipeline(monkeypatch, 4, 6, {})
+        request = SimpleNamespace(sampling_params=SimpleNamespace(extra_args={}))  # no global_steps -> validation
+        output = pipe.forward(request)
+        assert seen["capture_enabled"] is False
+        rl = output.output["metadata"]["rl"]
+        assert "all_latents" not in rl and "all_segment_timesteps" not in rl
+        assert output.output["metadata"]["media_artifacts"]["primary"] == "video_preview"
+
+    def test_video_seq_len_disagreeing_with_latent_meta_is_rejected(self, monkeypatch):
+        trajectory = {
+            "all_latents": torch.zeros(1, 2, 18, ART_ROW_WIDTH),
+            "all_timesteps": torch.tensor([[1000.0]]),
+            "all_segment_timesteps": torch.tensor([[[1000.0, 1000.0]]]),
+            "video_seq_len": torch.tensor([9]),  # 3 * rows would be 12
+        }
+        pipe, _ = self._pipeline(monkeypatch, 4, 6, trajectory)
+        with pytest.raises(RuntimeError, match="video_seq_len"):
+            pipe.forward(SimpleNamespace(sampling_params=SimpleNamespace(extra_args={"global_steps": 1})))

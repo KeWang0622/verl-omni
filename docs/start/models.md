@@ -334,7 +334,7 @@ trainer's README in `examples/`.
 | DPO | NPU ✅<br>GPU ✅ | — | GPU ✅ | — | — | — | — | GPU ✅ | — |
 | DiffusionNFT | NPU ✅<br>GPU ✅ | — | — | — | — | NPU ✅ (T2VA)<br>GPU ✅ | — | — | — |
 | [DGPO](../algo/dgpo.md) | — | — | GPU ✅ | — | — | — | — | — | — |
-| [DiffusionART](../algo/diffusionart.md) | WIP | — | — | — | WIP | — | — | — | — |
+| [DiffusionART](../algo/diffusionart.md) | WIP | — | — | — | WIP | WIP | — | — | — |
 | [DiffusionOPD](../algo/diffusion_opd.md) (incl. MOPD) | — | — | GPU ✅ | — | — | — | — | — | — |
 | GSPO (incl. OPD) | — | — | — | — | — | — | — | NPU ✅<br>GPU ✅ | — |
 

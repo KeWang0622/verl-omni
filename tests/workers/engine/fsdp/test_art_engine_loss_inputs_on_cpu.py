@@ -74,3 +74,22 @@ def test_loss_inputs_omit_optional_keys_when_absent():
         micro_batch, 0, micro_batch["train_latents"][:, 0], flow_time(micro_batch, 0), 1000
     )
     assert set(inputs) == {"art_guidance", "sigma_next"}
+
+
+def test_loss_inputs_pass_per_segment_flow_times_when_the_rollout_published_them():
+    """MiniMax-H3 denoises video and audio on different sigma grids: ``train_segment_timesteps`` (B, S, 2) becomes
+    ``segment_sigma`` / ``segment_sigma_next`` (B, 2) in flow-time units, sliced at the current step."""
+    micro_batch = make_micro_batch(with_optional=True)
+    micro_batch["train_segment_timesteps"] = torch.tensor([[[900.0, 450.0], [500.0, 250.0]]] * B)
+    micro_batch["train_segment_timesteps_next"] = torch.tensor([[[500.0, 250.0], [0.0, 0.0]]] * B)
+    inputs = ARTDiffusersFSDPEngine.art_loss_inputs(
+        micro_batch, 0, micro_batch["train_latents"][:, 0], flow_time(micro_batch, 0), 1000
+    )
+    torch.testing.assert_close(inputs["segment_sigma"], torch.tensor([[0.9, 0.45]] * B))
+    torch.testing.assert_close(inputs["segment_sigma_next"], torch.tensor([[0.5, 0.25]] * B))
+    # The video column equals the shared flow time, so single-grid models are unaffected by the extra keys.
+    torch.testing.assert_close(inputs["segment_sigma"][:, 0], flow_time(micro_batch, 0).reshape(B))
+    last = ARTDiffusersFSDPEngine.art_loss_inputs(
+        micro_batch, 1, micro_batch["train_latents"][:, 1], flow_time(micro_batch, 1), 1000
+    )
+    torch.testing.assert_close(last["segment_sigma_next"], torch.zeros(B, 2))
