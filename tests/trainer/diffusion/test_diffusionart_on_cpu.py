@@ -881,3 +881,74 @@ def test_validate_trainer_config_allows_guidance_extras_in_validation_only():
         ]
     )
     DiffusionARTLoss.validate_trainer_config(config)
+
+
+def test_loss_uses_per_segment_flow_times_when_given():
+    """``segment_sigma`` lets each modality use its own flow time (MiniMax H3 video/audio sigma grids)."""
+    inputs = make_inputs()
+    video_seq_len = torch.full((4,), 2, dtype=torch.long)
+    model_output = {key: inputs[key] for key in DiffusionARTLoss.required_model_output_keys}
+    sigma = inputs["t_expanded"].flatten()
+    audio_sigma = sigma * 0.5
+    audio_sigma_next = inputs["sigma_next"] * 0.5
+    data = TensorDict(
+        {
+            "art_guidance": inputs["art_guidance"],
+            "sigma_next": inputs["sigma_next"],
+            "video_seq_len": video_seq_len,
+            "segment_sigma": torch.stack([sigma, audio_sigma], dim=1),
+            "segment_sigma_next": torch.stack([inputs["sigma_next"], audio_sigma_next], dim=1),
+        },
+        batch_size=[4],
+    )
+    config = make_actor(art_mask_metric="fixed_mse", art_mask_threshold=1e9)
+    result = get_diffusion_loss_fn("diffusion_art")(config=config, model_output=model_output, data=data)
+    expected = torch.zeros(4)
+    for rows, seg_sigma, seg_next in (
+        (slice(0, 2), sigma, inputs["sigma_next"]),
+        (slice(2, 4), audio_sigma, audio_sigma_next),
+    ):
+        terms = art_loss(
+            inputs["forward_prediction"][:, rows],
+            inputs["old_prediction"][:, rows],
+            inputs["art_guidance"][:, rows],
+            seg_sigma,
+            seg_next,
+            mask_metric="fixed_mse",
+            mask_threshold=1e9,
+        )
+        expected = expected + 0.5 * terms["per_item_loss"]
+    torch.testing.assert_close(result.loss, expected.mean())
+    # The audio segment's loss weight is its own (halved) flow time, so it differs from the shared-sigma result.
+    del data["segment_sigma"], data["segment_sigma_next"]
+    shared = get_diffusion_loss_fn("diffusion_art")(config=config, model_output=model_output, data=data)
+    assert not torch.allclose(result.loss, shared.loss)
+    with pytest.raises(ValueError, match="segment_sigma"):
+        data["segment_sigma"] = torch.stack([sigma, audio_sigma, audio_sigma], dim=1)
+        data["segment_sigma_next"] = torch.stack([inputs["sigma_next"], audio_sigma_next], dim=1)
+        get_diffusion_loss_fn("diffusion_art")(config=config, model_output=model_output, data=data)
+
+
+def test_prepare_actor_batch_gathers_per_segment_timesteps():
+    uid = ["a", "a", "b", "b"]
+    batch = make_rollout_batch(uid, num_steps=5)
+    all_timesteps = batch.batch["all_timesteps"]
+    audio = all_timesteps * 0.5
+    batch.batch["all_segment_timesteps"] = torch.stack([all_timesteps, audio], dim=-1)
+    batch.batch["video_seq_len"] = torch.full((4,), 2, dtype=torch.long)
+    result = DiffusionARTLoss.prepare_actor_batch(
+        batch, torch.tensor([0.1, 0.9, 0.3, 0.5]), make_config(art_exclude_final_step=True)
+    )
+    seg = result.batch["train_segment_timesteps"]
+    seg_next = result.batch["train_segment_timesteps_next"]
+    assert seg.shape == (4, 4, 2) and seg_next.shape == (4, 4, 2)
+    torch.testing.assert_close(seg[..., 0], result.batch["train_timesteps"])
+    torch.testing.assert_close(seg[..., 1], result.batch["train_timesteps"] * 0.5)
+    torch.testing.assert_close(seg_next[..., 0], result.batch["train_timesteps_next"])
+    torch.testing.assert_close(seg_next[..., 1], result.batch["train_timesteps_next"] * 0.5)
+    assert "all_segment_timesteps" not in result.batch.keys()
+    with pytest.raises(ValueError, match="all_segment_timesteps"):
+        bad = make_rollout_batch(uid, num_steps=5)
+        bad.batch["all_segment_timesteps"] = torch.zeros(4, 5, 3)
+        bad.batch["video_seq_len"] = torch.full((4,), 2, dtype=torch.long)
+        DiffusionARTLoss.prepare_actor_batch(bad, torch.tensor([0.1, 0.9, 0.3, 0.5]), make_config())

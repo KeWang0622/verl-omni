@@ -1366,7 +1366,7 @@ class DiffusionARTLoss(DiffusionLossFn):
     uses_old_adapter = True
     required_model_output_keys = ("forward_prediction", "old_prediction", "t_expanded")
     required_data_keys = ("art_guidance", "sigma_next")
-    optional_data_keys = ("video_seq_len", "art_anchor", "rollout_velocity")
+    optional_data_keys = ("video_seq_len", "art_anchor", "rollout_velocity", "segment_sigma", "segment_sigma_next")
     #: Replicated per-sample tensors carrying whole-rollout scalars that the loss reports as ``actor/<name>``:
     #: OmniNFT's ``reward/<name>/{mean,std,min,max}`` and ``reward/sum/{mean,std}`` (same channel and
     #: semantics) plus ART's per-modality guidance statistics.
@@ -1396,6 +1396,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         video_seq_len: Optional[torch.Tensor] = None,
         art_anchor: Optional[torch.Tensor] = None,
         rollout_velocity: Optional[torch.Tensor] = None,
+        segment_sigma: Optional[torch.Tensor] = None,
+        segment_sigma_next: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Masked frozen-target MSE averaged over the micro batch (paper Algorithm 1, step 5).
 
@@ -1403,10 +1405,21 @@ class DiffusionARTLoss(DiffusionLossFn):
         ``1/|B|`` average. With ``video_seq_len`` the loss is the ``art_video_weight`` /
         ``art_audio_weight`` average of the two modality losses. ``rollout_velocity`` (the Euler
         velocity implied by consecutive rollout states) is only used for the ``old_rollout_gap`` metric.
+        ``segment_sigma`` / ``segment_sigma_next`` ``(B, n_segments)`` give each modality its own flow
+        time when the model denoises the modalities on different sigma grids (MiniMax H3: video shift 12,
+        audio shift 3); without them every segment uses ``t_expanded`` / ``sigma_next``.
         """
         loss_cfg = config.diffusion_loss
         sigma = t_expanded.reshape(t_expanded.shape[0], -1)[:, 0]
         segments = cls._segments(forward_prediction.shape[1], video_seq_len)
+        for name, value in (("segment_sigma", segment_sigma), ("segment_sigma_next", segment_sigma_next)):
+            if value is not None and tuple(value.shape) != (sigma.shape[0], len(segments)):
+                raise ValueError(
+                    f"{name} must have shape (batch, {len(segments)}) for {len(segments)} segment(s), "
+                    f"got {tuple(value.shape)}."
+                )
+        if (segment_sigma is None) != (segment_sigma_next is None):
+            raise ValueError("segment_sigma and segment_sigma_next must be given together.")
         segment_weights = {
             "": 1.0,
             "video": float(loss_cfg.art_video_weight),
@@ -1419,12 +1432,14 @@ class DiffusionARTLoss(DiffusionLossFn):
             anchor = None
             if art_anchor is not None:
                 anchor = art_anchor if art_anchor.ndim == 1 else art_anchor[:, index]
+            segment_t = sigma if segment_sigma is None else segment_sigma[:, index].float()
+            segment_t_next = sigma_next if segment_sigma_next is None else segment_sigma_next[:, index].float()
             terms = art_loss(
                 forward_prediction[:, rows],
                 old_prediction[:, rows],
                 art_guidance[:, rows],
-                sigma,
-                sigma_next,
+                segment_t,
+                segment_t_next,
                 guidance_gain=loss_cfg.art_guidance_gain,
                 loss_space=loss_cfg.art_loss_space,
                 mask_metric=loss_cfg.art_mask_metric,
@@ -1441,7 +1456,7 @@ class DiffusionARTLoss(DiffusionLossFn):
             )
             if name:
                 metrics[f"{prefix}policy_loss"] = terms["per_item_loss"].detach().mean().item()
-            metrics.update(cls._bucket_metrics(prefix, terms, sigma))
+            metrics.update(cls._bucket_metrics(prefix, terms, segment_t))
         loss = per_item_loss.mean()
         metrics["actor/policy_loss"] = loss.detach().item()
         metrics["actor/total_loss"] = loss.detach().item()
@@ -2011,6 +2026,22 @@ class DiffusionARTLoss(DiffusionLossFn):
             batch.batch["train_latents_next"] = next_states.gather(1, latent_index)
         batch.batch["train_timesteps"] = all_timesteps.gather(1, step_index)
         batch.batch["train_timesteps_next"] = next_timesteps.gather(1, step_index)
+        segment_timesteps = batch.batch.get("all_segment_timesteps", None)
+        if segment_timesteps is not None:
+            # (B, T, K) per-segment flow times (e.g. MiniMax H3 video/audio sigma grids); same gather as above.
+            if segment_timesteps.shape[:2] != all_timesteps.shape or segment_timesteps.ndim != 3:
+                raise ValueError(
+                    "all_segment_timesteps must have shape (B, T, n_segments) matching all_timesteps, got "
+                    f"{tuple(segment_timesteps.shape)} vs {tuple(all_timesteps.shape)}."
+                )
+            if segment_timesteps.shape[-1] != len(segments):
+                raise ValueError(
+                    f"all_segment_timesteps has {segment_timesteps.shape[-1]} columns for {len(segments)} segment(s)."
+                )
+            segment_next = torch.cat([segment_timesteps[:, 1:], torch.zeros_like(segment_timesteps[:, :1])], dim=1)
+            segment_index = step_index.unsqueeze(-1).expand(-1, -1, segment_timesteps.shape[-1])
+            batch.batch["train_segment_timesteps"] = segment_timesteps.gather(1, segment_index)
+            batch.batch["train_segment_timesteps_next"] = segment_next.gather(1, segment_index)
         batch.batch["art_guidance"] = guidance
         if pairwise:
             batch.batch["art_anchor"] = anchors[0] if len(anchors) == 1 else torch.stack(anchors, dim=1)
@@ -2018,7 +2049,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         batch.batch["advantages"] = advantages[:, None].expand(-1, num_train)
         batch.batch["returns"] = batch.batch["advantages"]
         batch.batch["sample_level_rewards"] = reward_tensor[:, None].expand(-1, num_train)
-        for key in ("all_latents", "all_next_latents", "all_log_probs"):
+        for key in ("all_latents", "all_next_latents", "all_log_probs", "all_segment_timesteps"):
             if key in batch.batch.keys():
                 del batch.batch[key]
         return batch

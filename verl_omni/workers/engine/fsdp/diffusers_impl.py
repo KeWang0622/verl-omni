@@ -1633,6 +1633,14 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
         for key in ("video_seq_len", "art_anchor"):
             if micro_batch.get(key, None) is not None:
                 loss_inputs[key] = micro_batch[key]
+        if micro_batch.get("train_segment_timesteps", None) is not None:
+            # Per-modality flow times (MiniMax H3 denoises video and audio on different sigma grids).
+            loss_inputs["segment_sigma"] = micro_batch["train_segment_timesteps"][:, step].float() / float(
+                num_train_timesteps
+            )
+            loss_inputs["segment_sigma_next"] = micro_batch["train_segment_timesteps_next"][:, step].float() / float(
+                num_train_timesteps
+            )
         # Whole-rollout scalars replicated per sample (logging only, see DiffusionARTLoss.batch_metric_prefix).
         for key in micro_batch.keys():
             if isinstance(key, str) and key.startswith("_art_metric::"):

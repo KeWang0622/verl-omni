@@ -20,6 +20,7 @@ from . import (
     ltx2_diffusion_art,
     ltx2_flow_grpo,
     minicpm,
+    minimax_h3_diffusion_art,
     minimax_h3_diffusion_nft,
     minimax_h3_flow_grpo,
     qwen3_omni,
@@ -43,6 +44,7 @@ from .flux_dance_grpo import *  # noqa: F401, F403
 from .ltx2_diffusion_art import *  # noqa: F401, F403
 from .ltx2_flow_grpo import *  # noqa: F401, F403
 from .minicpm import *  # noqa: F401, F403
+from .minimax_h3_diffusion_art import *  # noqa: F401, F403
 from .minimax_h3_diffusion_nft import *  # noqa: F401, F403
 from .minimax_h3_flow_grpo import *  # noqa: F401, F403
 from .qwen3_omni import *  # noqa: F401, F403
@@ -69,6 +71,7 @@ __all__ += list(bagel_flow_grpo.__all__)
 __all__ += list(ltx2_flow_grpo.__all__)
 __all__ += list(ltx2_diffusion_art.__all__)
 __all__ += list(minicpm.__all__)
+__all__ += list(minimax_h3_diffusion_art.__all__)
 __all__ += list(minimax_h3_diffusion_nft.__all__)
 __all__ += list(minimax_h3_flow_grpo.__all__)
 __all__ += list(sd3_dgpo.__all__)
