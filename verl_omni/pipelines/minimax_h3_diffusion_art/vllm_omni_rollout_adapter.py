@@ -158,7 +158,11 @@ class MiniMaxH3DiffusionARTPipeline(MiniMaxH3DiffusionNFTPipeline):
         trajectory, self._art_trajectory = self._art_trajectory, None
         if trajectory is None:
             return output
-        rl = output.output["metadata"]["rl"]
+        envelope = output.output
+        if not isinstance(envelope, dict) or "rl" not in (envelope.get("metadata") or {}):
+            # Warm-up / placeholder outputs carry no training payload (see the base adapter); nothing to extend.
+            return output
+        rl = envelope["metadata"]["rl"]
         if int(rl["latent_meta"].reshape(-1)[0]) * 3 != int(trajectory["video_seq_len"].item()):
             raise RuntimeError("MiniMax H3 DiffusionART video_seq_len disagrees with latent_meta.")
         rl.update(trajectory)

@@ -11,36 +11,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""vLLM-Omni rollout adapter for LTX-2.3 DiffusionART."""
+"""LTX-2.3 joint audio-video rollout for DiffusionART: a pure ODE whose every visited state is kept."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
-from vllm_omni.diffusion.data import DiffusionOutput
 from vllm_omni.diffusion.request import OmniDiffusionRequest
-from vllm_omni.diffusion.worker.request_batch import DiffusionRequestBatch
 
 from verl_omni.pipelines.ltx2_flow_grpo.common import normalize_ltx_output_type
 from verl_omni.pipelines.ltx2_flow_grpo.vllm_omni_rollout_adapter import LTX23PipelineWithLogProb
 from verl_omni.pipelines.model_base import VllmOmniPipelineBase
 
-__all__ = ["LTX23DiffusionARTPipeline", "REWARD_METADATA_KEYS", "reward_metadata"]
-
-#: Per-sample metadata the native audio-video scorers read from the batch (VideoAlign / DeSync: ``fps``;
-#: AudioBox / CLAP / DeSync: ``audio`` + ``audio_sample_rate``). Identical to what the OmniNFT LTX adapter
-#: publishes, so rewards are computed like-for-like.
-REWARD_METADATA_KEYS = ("audio", "audio_sample_rate", "fps")
-
-
-def reward_metadata(audio: Any, audio_sample_rate: int, frame_rate: float) -> dict[str, Any]:
-    """Scorer-facing rollout metadata for one text-to-audio-video sample (keys ``REWARD_METADATA_KEYS``)."""
-    return {
-        "audio": audio,
-        "audio_sample_rate": torch.tensor([int(audio_sample_rate)]),
-        "fps": torch.tensor([float(frame_rate)], dtype=torch.float32),
-    }
+__all__ = ["LTX23DiffusionARTPipeline"]
 
 
 @VllmOmniPipelineBase.register("LTX2Pipeline", algorithm="diffusion_art")
@@ -48,9 +30,11 @@ class LTX23DiffusionARTPipeline(LTX23PipelineWithLogProb):
     """Deterministic LTX-2.3 rollout that keeps every visited joint video/audio state.
 
     Reuses the FlowGRPO trajectory capture (``all_latents`` / ``all_next_latents`` /
-    ``all_timesteps`` / ``video_seq_len``), adds the scorer metadata the OmniNFT adapter publishes
-    (``fps`` next to ``audio`` / ``audio_sample_rate``), and runs a pure ODE: noise level 0 at every step, all
-    ``T`` transitions recorded, no log-probabilities. Per-modality CFG (``video_cfg_scale`` /
+    ``all_timesteps`` / ``video_seq_len``) and the base adapter's named media artifacts
+    (``video_preview`` with the resolved frame rate, ``audio`` with the vocoder sample rate,
+    ``video_latent`` / ``audio_latent``; see ``docs/advanced/diffusion_media_artifacts.md``), which the
+    audio-video scorers select by name. This class only changes the sampler: noise level 0 at every
+    step, all ``T`` transitions recorded, no log-probabilities. Per-modality CFG (``video_cfg_scale`` /
     ``audio_cfg_scale``) is allowed because the DiffusionART training adapter applies the same
     clean-space guidance when it recomputes ``v_old``. STG, modality and rescale guidance are passed
     through to the native LTX sampler untouched: validation rollouts (``val_kwargs``) may use them,
@@ -59,25 +43,6 @@ class LTX23DiffusionARTPipeline(LTX23PipelineWithLogProb):
     """
 
     supports_request_batch = False
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._art_frame_rate: float | None = None
-
-    def run_phase(self, req: DiffusionRequestBatch, request_inputs: Any, **kwargs: Any):
-        """Record the request frame rate for the scorer metadata, then run the FlowGRPO capture."""
-        self._art_frame_rate = float(request_inputs.frame_rate)
-        return super().run_phase(req, request_inputs, **kwargs)
-
-    @torch.no_grad()
-    def forward(self, req: DiffusionRequestBatch, **kwargs: Any) -> DiffusionOutput | list[DiffusionOutput]:
-        """Generate one request and publish the ART trajectory plus the scorer metadata (``fps`` included)."""
-        output = super().forward(req, **kwargs)
-        if self._art_frame_rate is None:
-            raise RuntimeError("LTX-2.3 DiffusionART rollout did not record the request frame rate.")
-        rl = output.output["metadata"]["rl"]
-        rl.update(reward_metadata(rl["audio"], int(rl["audio_sample_rate"]), self._art_frame_rate))
-        return output
 
     def _configure_flow_grpo(self, req: OmniDiffusionRequest) -> None:
         req.sampling_params.output_type = normalize_ltx_output_type(req.sampling_params.output_type)
