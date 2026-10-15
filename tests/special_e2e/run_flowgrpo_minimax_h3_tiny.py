@@ -128,6 +128,21 @@ def _tiny_patch_environment(tiny_model_dir: str, task: str) -> dict[str, str]:
     return env
 
 
+def _rollout_n(task: str) -> int:
+    # The Ref2VA rollout path requires exactly one output per request, while
+    # T2VA and FL2VA use two responses to exercise grouped advantages.
+    return 1 if task == "ref2va" else 2
+
+
+def _train_batch_size(num_gpus: int, task: str, algorithm: str, micro_bsz_per_gpu: int = 1) -> int:
+    """Prompts per rollout batch; the dummy parquet must hold at least this many rows.
+
+    DiffusionART applies two disjoint updates per rollout batch, so its batch is two mini batches of prompts.
+    """
+    mini_bsz = max(1, num_gpus * micro_bsz_per_gpu)
+    return mini_bsz * _rollout_n(task) * (2 if algorithm == "diffusion_art" else 1)
+
+
 def _hydra_overrides(
     *,
     tiny_model_dir: str,
@@ -155,12 +170,9 @@ def _hydra_overrides(
     if algorithm == "diffusion_art" and task != "t2va":
         raise ValueError("the MiniMax-H3 DiffusionART adapter supports text-to-audio-video only")
     micro_bsz_per_gpu = 1
-    # The Ref2VA rollout path requires exactly one output per request, while
-    # T2VA and FL2VA use two responses to exercise grouped advantages.
-    n_resp_per_prompt = 1 if task == "ref2va" else 2
+    n_resp_per_prompt = _rollout_n(task)
     mini_bsz = max(1, num_gpus * micro_bsz_per_gpu)
-    # DiffusionART applies two disjoint updates per rollout batch: the batch is two mini batches of prompts.
-    train_batch_size = mini_bsz * n_resp_per_prompt * (2 if algorithm == "diffusion_art" else 1)
+    train_batch_size = _train_batch_size(num_gpus, task, algorithm, micro_bsz_per_gpu)
     partition_dir = "Ref2VA" if task == "ref2va" else "FL2VA"
     rollout_model = f"{tiny_model_dir}/{partition_dir}"
     actor_transformer = f"{tiny_model_dir}/transformer"
@@ -362,11 +374,9 @@ def run_smoke(
     ensure_tiny_minimax_h3_checkpoint(tiny_model_dir, skip_if_exists=not force_rebuild)
 
     _validate_actor_sp(num_gpus, actor_sp)
-    micro_bsz_per_gpu = 1
-    # Match the rollout n in ``_hydra_overrides``: Ref2VA supports one output per
-    # request, while T2VA and FL2VA sample two responses per prompt.
-    n_resp_per_prompt = 1 if task == "ref2va" else 2
-    train_batch_size = max(1, num_gpus * micro_bsz_per_gpu) * n_resp_per_prompt
+    # Must match ``data.train_batch_size`` in ``_hydra_overrides`` (DiffusionART doubles it): a smaller parquet
+    # gives an empty dataloader and ``steps_per_epoch == 0``.
+    train_batch_size = _train_batch_size(num_gpus, task, algorithm)
     print(f"[2/3] ensuring dummy {task} parquet at {data_dir}", flush=True)
     if task == "t2va":
         train_parquet, val_parquet = build_dummy_h3_t2va_data(
