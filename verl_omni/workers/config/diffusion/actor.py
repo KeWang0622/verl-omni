@@ -56,6 +56,11 @@ class DiffusionLossConfig(BaseConfig):
     art_corrective_mask_enabled: bool = True
     art_video_weight: float = 1.0
     art_audio_weight: float = 1.0
+    # OmniNFT-only modality weights and reference regularization coefficients.
+    video_weight: float = 1.0
+    audio_weight: float = 1.0
+    video_ref_kl_coef: float = 0.0
+    audio_ref_kl_coef: float = 0.0
 
     def __post_init__(self):
         """Validate diffusion loss configuration."""
@@ -64,6 +69,7 @@ class DiffusionLossConfig(BaseConfig):
             "flow_dppo",
             "grpo_guard",
             "diffusion_nft",
+            "omni_nft",
             "dgpo",
             "diffusion_art",
             "dpo",
