@@ -1644,7 +1644,7 @@ class ARTDiffusersFSDPEngine(NFTDiffusersFSDPEngine):
             if micro_batch.get(key, None) is not None:
                 loss_inputs[key] = micro_batch[key]
         if micro_batch.get("train_segment_timesteps", None) is not None:
-            # Per-modality flow times (MiniMax H3 denoises video and audio on different sigma grids).
+            # Per-modality flow times (pipelines that denoise video and audio on different sigma grids).
             loss_inputs["segment_sigma"] = micro_batch["train_segment_timesteps"][:, step].float() / float(
                 num_train_timesteps
             )

@@ -1354,7 +1354,7 @@ class DiffusionARTLoss(DiffusionLossFn):
     update: the second mini batch sees ``v_theta`` after the first step while its target still comes
     from ``v_old``. There are no likelihoods, no differentiable reward, no EMA and no KL term.
 
-    Audio-video models (LTX-2.3) keep one unified token sequence ``[video | audio]`` split at
+    Audio-video pipelines keep one unified token sequence ``[video | audio]`` split at
     ``video_seq_len``. Guidance, mask and MSE are then computed per modality, each from its own
     reward route (``algorithm.art_modality_reward_weights`` or ``reward_functions.*.routing_weights``)
     and with its own unit RMS, and combined with ``art_video_weight`` / ``art_audio_weight``.
@@ -1403,8 +1403,8 @@ class DiffusionARTLoss(DiffusionLossFn):
         ``art_audio_weight`` average of the two modality losses. ``rollout_velocity`` (the Euler
         velocity implied by consecutive rollout states) is only used for the ``old_rollout_gap`` metric.
         ``segment_sigma`` / ``segment_sigma_next`` ``(B, n_segments)`` give each modality its own flow
-        time when the model denoises the modalities on different sigma grids (MiniMax H3: video shift 12,
-        audio shift 3); without them every segment uses ``t_expanded`` / ``sigma_next``.
+        time when a pipeline denoises the modalities on different sigma grids (the pipeline adapter
+        supplies them); without them every segment uses ``t_expanded`` / ``sigma_next``.
         """
         loss_cfg = config.diffusion_loss
         sigma = t_expanded.reshape(t_expanded.shape[0], -1)[:, 0]
@@ -1622,9 +1622,9 @@ class DiffusionARTLoss(DiffusionLossFn):
         covariance (``rollout.n >= 2``), the rollout is an ODE, ``v_old`` is recomputed by the
         training forward, so the training-side CFG must equal the rollout CFG, and the per-rank mini
         batch (``ppo_mini_batch_size * n / dp`` samples) must be divisible by
-        ``ppo_micro_batch_size_per_gpu``, which the engine otherwise asserts only after the first rollout. The paper's two-update
-        restoration follows from ``ppo_mini_batch_size`` splitting the rollout batch in two; any other
-        split only logs a warning so ablations stay possible.
+        ``ppo_micro_batch_size_per_gpu``, which the engine otherwise asserts only after the first rollout.
+        The paper's two-update restoration follows from ``ppo_mini_batch_size`` splitting the rollout batch
+        in two; any other split only logs a warning so ablations stay possible.
         """
         DiffusionLossFn.validate_trainer_config(config)
         algorithm_cfg = config.algorithm
@@ -1710,9 +1710,9 @@ class DiffusionARTLoss(DiffusionLossFn):
         elif micro is not None and (mini_samples // dp_size) % int(micro):
             per_gpu = mini_samples // dp_size
             problems.append(
-                f"each rank gets {per_gpu} samples per mini batch (ppo_mini_batch_size {actor_cfg.ppo_mini_batch_size} x "
-                f"rollout.n {n} / dp {dp_size}), which must be divisible by ppo_micro_batch_size_per_gpu={micro}; set it "
-                f"to a divisor of {per_gpu} or raise ppo_mini_batch_size"
+                f"each rank gets {per_gpu} samples per mini batch (ppo_mini_batch_size "
+                f"{actor_cfg.ppo_mini_batch_size} x rollout.n {n} / dp {dp_size}), which must be divisible by "
+                f"ppo_micro_batch_size_per_gpu={micro}; set it to a divisor of {per_gpu} or raise ppo_mini_batch_size"
             )
         if problems:
             raise ValueError("DiffusionART config is not supported: " + "; ".join(problems) + ".")
@@ -1795,7 +1795,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         """Return ``(states, next_states, timesteps)`` with ``T`` entries each, for both rollout layouts.
 
         Image rollouts emit ``all_latents`` ``(B, T + 1, ...)`` whose last entry is the clean endpoint;
-        LTX-2.3 emits ``all_latents`` ``(B, T, ...)`` plus ``all_next_latents``.
+        audio-video pipelines emit ``all_latents`` ``(B, T, ...)`` plus ``all_next_latents``.
         """
         all_latents = batch.batch["all_latents"]
         all_timesteps = batch.batch["all_timesteps"]
@@ -2019,7 +2019,7 @@ class DiffusionARTLoss(DiffusionLossFn):
         batch.batch["train_timesteps_next"] = next_timesteps.gather(1, step_index)
         segment_timesteps = batch.batch.get("all_segment_timesteps", None)
         if segment_timesteps is not None:
-            # (B, T, K) per-segment flow times (e.g. MiniMax H3 video/audio sigma grids); same gather as above.
+            # (B, T, K) per-segment flow times (modalities on different sigma grids); same gather as above.
             if segment_timesteps.shape[:2] != all_timesteps.shape or segment_timesteps.ndim != 3:
                 raise ValueError(
                     "all_segment_timesteps must have shape (B, T, n_segments) matching all_timesteps, got "
