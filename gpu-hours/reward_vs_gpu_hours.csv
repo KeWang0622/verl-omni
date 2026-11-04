@@ -1,0 +1,29 @@
+arm,step,gpu_hours,val_reward,gpu_hours_estimated,reward_source
+DiffusionART K=8,0,0.0,9.1044,False,archived log
+DiffusionART K=8,10,27.39,11.724,False,archived log
+DiffusionART K=8,20,54.38,11.9097,False,archived log
+DiffusionART K=8,30,81.38,12.42,True,recorded from the run log (not archived)
+DiffusionART K=8,40,108.38,12.83,True,recorded from the run log (not archived)
+DiffusionART K=8,50,135.37,12.76,True,recorded from the run log (not archived)
+OmniNFT (DiffusionNFT),0,0.0,9.1044,False,archived log
+OmniNFT (DiffusionNFT),10,20.45,10.7288,False,archived log
+OmniNFT (DiffusionNFT),20,40.53,11.5497,False,archived log
+OmniNFT (DiffusionNFT),30,60.63,12.2811,False,archived log
+OmniNFT (DiffusionNFT),40,80.72,12.937,False,archived log
+OmniNFT (DiffusionNFT),50,102.69,13.1319,False,archived log
+OmniNFT (DiffusionNFT),60,125.46,13.6662,False,archived log
+OmniNFT (DiffusionNFT),70,149.69,13.9054,False,archived log
+OmniNFT (DiffusionNFT),80,170.62,14.0566,False,archived log
+OmniNFT (DiffusionNFT),90,191.55,14.4114,False,archived log
+OmniNFT (DiffusionNFT),100,212.53,14.8562,False,archived log
+OmniNFT (DiffusionNFT),110,236.89,14.933,False,archived log
+OmniNFT (DiffusionNFT),120,257.78,15.0477,False,archived log
+OmniNFT (DiffusionNFT),130,278.68,15.0287,False,archived log
+OmniNFT (DiffusionNFT),140,299.58,15.7638,False,archived log
+OmniNFT (DiffusionNFT),150,320.47,15.9165,False,archived log
+DiffusionART K=2 pairwise,0,0.0,9.1044,False,archived log
+DiffusionART K=2 pairwise,10,13.37,9.4616,False,archived log
+DiffusionART K=2 pairwise,20,26.39,11.1094,False,archived log
+DiffusionART K=2 pairwise,30,39.38,11.3452,False,archived log
+DiffusionART K=2 pairwise,40,52.34,11.6995,False,archived log
+DiffusionART K=2 pairwise,50,65.33,11.73,True,recorded from the run log (not archived)

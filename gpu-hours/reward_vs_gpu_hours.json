@@ -1,0 +1,295 @@
+{
+ "definition": {
+  "gpu_hours": "8 x cumulative timing_s/step (validation steps included); steps without an archived time use the run's median step time (validation and non-validation steps separately)",
+  "val_reward": "val-core/omninft_vggsound/reward/mean@1: mean raw combined reward on the fixed-seed validation prompts",
+  "crossing": "first threshold crossing, linearly interpolated between consecutive validation points",
+  "speedup": "GPU-hours(baseline reaches threshold) / GPU-hours(ART reaches threshold); '> Nx' when the baseline does not reach it within its run (N from its last point)"
+ },
+ "thresholds": [
+  11.11,
+  12.28
+ ],
+ "curves": {
+  "DiffusionART K=8": [
+   {
+    "step": 0,
+    "gpu_hours": 0.0,
+    "reward": 9.104448333382607,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 10,
+    "gpu_hours": 27.39232269514559,
+    "reward": 11.724023997783661,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 20,
+    "gpu_hours": 54.38064481757167,
+    "reward": 11.909662246704102,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 30,
+    "gpu_hours": 81.37811422158757,
+    "reward": 12.42,
+    "gpu_hours_estimated": true,
+    "reward_source": "recorded from the run log (not archived)"
+   },
+   {
+    "step": 40,
+    "gpu_hours": 108.37655597374878,
+    "reward": 12.83,
+    "gpu_hours_estimated": true,
+    "reward_source": "recorded from the run log (not archived)"
+   },
+   {
+    "step": 50,
+    "gpu_hours": 135.37499772591,
+    "reward": 12.76,
+    "gpu_hours_estimated": true,
+    "reward_source": "recorded from the run log (not archived)"
+   }
+  ],
+  "OmniNFT (DiffusionNFT)": [
+   {
+    "step": 0,
+    "gpu_hours": 0.0,
+    "reward": 9.104448333382607,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 10,
+    "gpu_hours": 20.447684637546125,
+    "reward": 10.728797197341919,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 20,
+    "gpu_hours": 40.533582340983884,
+    "reward": 11.549722045660019,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 30,
+    "gpu_hours": 60.62513701397719,
+    "reward": 12.281052440404892,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 40,
+    "gpu_hours": 80.72396904815817,
+    "reward": 12.936956405639648,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 50,
+    "gpu_hours": 102.69037521291524,
+    "reward": 13.13188949227333,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 60,
+    "gpu_hours": 125.46009456444739,
+    "reward": 13.666158020496368,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 70,
+    "gpu_hours": 149.6893607940256,
+    "reward": 13.905427068471909,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 80,
+    "gpu_hours": 170.62263478390253,
+    "reward": 14.05656385421753,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 90,
+    "gpu_hours": 191.54816180112462,
+    "reward": 14.411393165588379,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 100,
+    "gpu_hours": 212.53008764270692,
+    "reward": 14.856168508529663,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 110,
+    "gpu_hours": 236.88949177889566,
+    "reward": 14.933049261569977,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 120,
+    "gpu_hours": 257.78169569823683,
+    "reward": 15.047726333141327,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 130,
+    "gpu_hours": 278.6771979199619,
+    "reward": 15.028680264949799,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 140,
+    "gpu_hours": 299.58340210434466,
+    "reward": 15.76384425163269,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 150,
+    "gpu_hours": 320.4734044064188,
+    "reward": 15.91647207736969,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   }
+  ],
+  "DiffusionART K=2 pairwise": [
+   {
+    "step": 0,
+    "gpu_hours": 0.0,
+    "reward": 9.104448333382607,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 10,
+    "gpu_hours": 13.373461159004105,
+    "reward": 9.46158742904663,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 20,
+    "gpu_hours": 26.3853867604004,
+    "reward": 11.109368562698364,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 30,
+    "gpu_hours": 39.37702689241825,
+    "reward": 11.345153033733368,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 40,
+    "gpu_hours": 52.336209407951685,
+    "reward": 11.699459999799728,
+    "gpu_hours_estimated": false,
+    "reward_source": "archived log"
+   },
+   {
+    "step": 50,
+    "gpu_hours": 65.33479520401607,
+    "reward": 11.73,
+    "gpu_hours_estimated": true,
+    "reward_source": "recorded from the run log (not archived)"
+   }
+  ]
+ },
+ "crossings": {
+  "DiffusionART K=8": {
+   "11.11": {
+    "gpu_hours": 20.971609707762166,
+    "step_between": [
+     0,
+     10
+    ],
+    "uses_estimated": false
+   },
+   "12.28": {
+    "gpu_hours": 73.9719490061939,
+    "step_between": [
+     20,
+     30
+    ],
+    "uses_estimated": true
+   }
+  },
+  "OmniNFT (DiffusionNFT)": {
+   "11.11": {
+    "gpu_hours": 29.774726588025672,
+    "step_between": [
+     10,
+     20
+    ],
+    "uses_estimated": false
+   },
+   "12.28": {
+    "gpu_hours": 60.59622372924718,
+    "step_between": [
+     20,
+     30
+    ],
+    "uses_estimated": false
+   }
+  },
+  "DiffusionART K=2 pairwise": {
+   "11.11": {
+    "gpu_hours": 26.420178730171635,
+    "step_between": [
+     20,
+     30
+    ],
+    "uses_estimated": false
+   },
+   "12.28": null
+  }
+ },
+ "speedups": [
+  {
+   "threshold": 11.11,
+   "art": "DiffusionART K=8",
+   "baseline": "OmniNFT (DiffusionNFT)",
+   "speedup": 1.4197635280712493,
+   "text": "1.42x"
+  },
+  {
+   "threshold": 11.11,
+   "art": "DiffusionART K=2 pairwise",
+   "baseline": "OmniNFT (DiffusionNFT)",
+   "speedup": 1.1269691583888934,
+   "text": "1.13x"
+  },
+  {
+   "threshold": 12.28,
+   "art": "DiffusionART K=8",
+   "baseline": "OmniNFT (DiffusionNFT)",
+   "speedup": 0.8191784121325947,
+   "text": "0.82x"
+  },
+  {
+   "threshold": 12.28,
+   "art": "DiffusionART K=2 pairwise",
+   "baseline": "OmniNFT (DiffusionNFT)",
+   "speedup": null,
+   "text": "DiffusionART K=2 pairwise does not reach 12.28 (last point 65.3 GPU-h)"
+  }
+ ]
+}
