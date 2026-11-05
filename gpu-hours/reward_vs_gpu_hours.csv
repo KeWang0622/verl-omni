@@ -1,29 +1,41 @@
-arm,step,gpu_hours,val_reward,gpu_hours_estimated,reward_source
-DiffusionART K=8,0,0.0,9.1044,False,archived log
-DiffusionART K=8,10,27.39,11.724,False,archived log
-DiffusionART K=8,20,54.38,11.9097,False,archived log
-DiffusionART K=8,30,81.38,12.42,True,recorded from the run log (not archived)
-DiffusionART K=8,40,108.38,12.83,True,recorded from the run log (not archived)
-DiffusionART K=8,50,135.37,12.76,True,recorded from the run log (not archived)
-OmniNFT (DiffusionNFT),0,0.0,9.1044,False,archived log
-OmniNFT (DiffusionNFT),10,20.45,10.7288,False,archived log
-OmniNFT (DiffusionNFT),20,40.53,11.5497,False,archived log
-OmniNFT (DiffusionNFT),30,60.63,12.2811,False,archived log
-OmniNFT (DiffusionNFT),40,80.72,12.937,False,archived log
-OmniNFT (DiffusionNFT),50,102.69,13.1319,False,archived log
-OmniNFT (DiffusionNFT),60,125.46,13.6662,False,archived log
-OmniNFT (DiffusionNFT),70,149.69,13.9054,False,archived log
-OmniNFT (DiffusionNFT),80,170.62,14.0566,False,archived log
-OmniNFT (DiffusionNFT),90,191.55,14.4114,False,archived log
-OmniNFT (DiffusionNFT),100,212.53,14.8562,False,archived log
-OmniNFT (DiffusionNFT),110,236.89,14.933,False,archived log
-OmniNFT (DiffusionNFT),120,257.78,15.0477,False,archived log
-OmniNFT (DiffusionNFT),130,278.68,15.0287,False,archived log
-OmniNFT (DiffusionNFT),140,299.58,15.7638,False,archived log
-OmniNFT (DiffusionNFT),150,320.47,15.9165,False,archived log
-DiffusionART K=2 pairwise,0,0.0,9.1044,False,archived log
-DiffusionART K=2 pairwise,10,13.37,9.4616,False,archived log
-DiffusionART K=2 pairwise,20,26.39,11.1094,False,archived log
-DiffusionART K=2 pairwise,30,39.38,11.3452,False,archived log
-DiffusionART K=2 pairwise,40,52.34,11.6995,False,archived log
-DiffusionART K=2 pairwise,50,65.33,11.73,True,recorded from the run log (not archived)
+arm,step,gpu_hours,val_reward,gain_over_step0,noise_sd,source
+DiffusionART K=8,0,0.0,9.1044,0.0,0.0,"October run, archived log"
+DiffusionART K=8,10,34.63,11.724,2.6196,0.0,"October run, archived log"
+DiffusionART K=8,20,69.27,11.9097,2.8052,0.0,"October run, archived log"
+DiffusionART K=8,30,103.9,12.42,3.3156,0.0,"October run, recorded from the run log (not archived)"
+DiffusionART K=8,40,138.53,12.83,3.7256,0.0,"October run, recorded from the run log (not archived)"
+DiffusionART K=8,50,173.17,12.76,3.6556,0.0,"October run, recorded from the run log (not archived)"
+OmniNFT (DiffusionNFT),0,0.0,9.1044,0.0,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),10,26.8,10.7288,1.6243,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),20,53.6,11.5497,2.4453,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),30,80.41,12.2811,3.1766,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),40,107.21,12.937,3.8325,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),50,134.01,13.1319,4.0274,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),60,160.81,13.6662,4.5617,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),70,187.62,13.9054,4.801,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),80,214.42,14.0566,4.9521,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),90,241.22,14.4114,5.3069,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),100,268.02,14.8562,5.7517,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),110,294.82,14.933,5.8286,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),120,321.63,15.0477,5.9433,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),130,348.43,15.0287,5.9242,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),140,375.23,15.7638,6.6594,0.0,"October run, archived log"
+OmniNFT (DiffusionNFT),150,402.03,15.9165,6.812,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,0,0.0,9.1044,0.0,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,10,11.09,9.4616,0.3571,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,20,22.18,11.1094,2.0049,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,30,33.27,11.3452,2.2407,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,40,44.36,11.6995,2.595,0.0,"October run, archived log"
+DiffusionART K=2 pairwise,50,55.46,11.73,2.6256,0.0,"October run, recorded from the run log (not archived)"
+FlowGRPO K=8,0,0.0,9.6215,0.0,0.27,"current run (PR head), driver log"
+FlowGRPO K=8,5,10.35,10.9717,1.3502,0.27,"current run (PR head), driver log"
+FlowGRPO K=8,10,20.71,11.8436,2.2221,0.27,"current run (PR head), driver log"
+FlowGRPO K=8,15,31.06,12.074,2.4524,0.27,"current run (PR head), driver log"
+FlowGRPO K=8,20,41.41,12.8542,3.2327,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,0,0.0,9.6526,0.0,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,5,3.66,9.7062,0.0536,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,10,7.32,9.8255,0.1729,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,15,10.98,10.7263,1.0737,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,20,14.65,10.7153,1.0628,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,25,18.31,10.9867,1.3342,0.27,"current run (PR head), driver log"
+DiffusionART-Flash K=2,30,21.97,11.4215,1.7689,0.27,"current run (PR head), driver log"

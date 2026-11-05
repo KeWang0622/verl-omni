@@ -1,9 +1,10 @@
-"""Reward vs GPU-hours figure for verl-project/verl-omni PR #744 (LTX-2.3 T2AV, 8×B200 per arm).
+"""Reward vs GPU-hours for verl-project/verl-omni PR #744 (LTX-2.3 T2AV), v2: one hardware, one timing source.
 
-Inputs: ``metrics.json`` from the ``assets-pr744`` branch (archived per-step logs of OmniNFT, DiffusionART K=8 and
-K=2) plus the validation rewards recorded from the run logs where the archive stops, and optionally ``driver.log``
-files of newer arms (``--arm NAME=PATH``). GPU-hours = 8 × cumulative ``timing_s/step`` (validation steps included),
-as in the table posted on the PR. Writes the PNG, a per-point CSV and a JSON with thresholds, crossings and speedups.
+x = 8 × step × (median training-step time on 8×B200 measured on the PR head, validation steps and step 1 excluded),
+the same definition for every arm. y = validation reward (mean raw combined reward on the 16 fixed-seed prompts), either
+raw or as the gain over the arm's own step-0 (base model) value. Reward-vs-step comes from the October runs
+(``metrics.json`` + the validation rewards recorded beyond the archive) for OmniNFT and DiffusionART K=8 / K=2, and from
+the current runs' driver logs for FlowGRPO and DiffusionART-Flash.
 """
 
 import argparse
@@ -20,219 +21,215 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 VAL_KEY = "val-core/omninft_vggsound/reward/mean@1"
 GPUS = 8
-# Validated categorical order (dataviz reference palette, light mode); colour follows the arm, never its rank.
-ARMS = {
+ARMS = {  # validated categorical order (dataviz reference palette); colour follows the arm
     "DiffusionART K=8": dict(color="#2a78d6", marker="o", art=True),
     "OmniNFT (DiffusionNFT)": dict(color="#eb6834", marker="s", art=False),
     "DiffusionART K=2 pairwise": dict(color="#1baf7a", marker="^", art=True),
     "FlowGRPO K=8": dict(color="#eda100", marker="D", art=False),
     "DiffusionART-Flash K=2": dict(color="#e87ba4", marker="v", art=True),
 }
-ARCHIVE = {  # metrics.json run name -> (arm, last step, validation rewards recorded from the logs beyond the archive)
-    "OmniNFT run1": ("OmniNFT (DiffusionNFT)", 150, {}),
-    "DiffusionART art_run1": ("DiffusionART K=8", 50, {30: 12.42, 40: 12.83, 50: 12.76}),
-    "DiffusionART K=2 pairwise": ("DiffusionART K=2 pairwise", 50, {50: 11.73}),
+ARCHIVE = {  # metrics.json run -> (arm, validation rewards recorded from the run logs beyond the archive)
+    "OmniNFT run1": ("OmniNFT (DiffusionNFT)", {}),
+    "DiffusionART art_run1": ("DiffusionART K=8", {30: 12.42, 40: 12.83, 50: 12.76}),
+    "DiffusionART K=2 pairwise": ("DiffusionART K=2 pairwise", {50: 11.73}),
 }
 INK, INK2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 
 
-def curve_from_steps(times: dict, vals: dict, last: int, recorded: dict) -> list[dict]:
-    """Cumulative GPU-hours per validation step; missing step times use the run's median (val / non-val separately)."""
-    non_val = [t for s, t in times.items() if s % 10 and s != 1]
-    val_steps = [t for s, t in times.items() if s % 10 == 0]
-    med_nv = statistics.median(non_val)
-    med_v = statistics.median(val_steps) if val_steps else med_nv
-    points = [dict(step=0, gpu_hours=0.0, reward=vals[0], gpu_hours_estimated=False, reward_source="archived log")]
-    cum, estimated = 0.0, False
-    for step in range(1, last + 1):
-        if step in times:
-            cum += times[step]
-        else:
-            cum += med_v if step % 10 == 0 else med_nv
-            estimated = True
-        if step % 10 == 0:
-            if step in vals:
-                reward, source = vals[step], "archived log"
-            elif step in recorded:
-                reward, source = recorded[step], "recorded from the run log (not archived)"
-            else:
-                continue
-            points.append(
-                dict(step=step, gpu_hours=GPUS * cum / 3600, reward=reward, gpu_hours_estimated=estimated,
-                     reward_source=source)
-            )
-    return points
+def _num(raw: str) -> float:
+    return float(re.sub(r"^np\.\w+\((.*)\)$", r"\1", raw.strip().strip("',\"")))
 
 
-def load_archive(path: Path) -> dict:
-    data = json.loads(path.read_text())
-    curves = {}
-    for run, (arm, last, recorded) in ARCHIVE.items():
-        steps = {int(s): v for s, v in data[run].items()}
-        times = {s: v["timing_s/step"] for s, v in steps.items() if "timing_s/step" in v}
-        vals = {s: v[VAL_KEY] for s, v in steps.items() if VAL_KEY in v}
-        curves[arm] = curve_from_steps(times, vals, last, recorded)
-    return curves
-
-
-def load_driver_log(path: Path) -> list[dict]:
-    """Per-step times and validation rewards from a verl driver.log (Ray-prefixed ``step:N - key:value`` lines)."""
+def parse_driver_log(path: Path) -> tuple[dict, dict]:
+    """Return ({step: timing_s/step}, {step: val reward}) from a Ray-prefixed verl driver.log."""
+    text = path.read_text(errors="replace")
     times, vals = {}, {}
-    for line in path.read_text(errors="replace").splitlines():
+    for line in text.splitlines():
         m = re.search(r"step:(\d+) - (.*)$", line)
         if not m:
             continue
         step = int(m.group(1))
         for key, raw in re.findall(r"(\S+):(\S+?)(?: - |$)", m.group(2)):
-            raw = re.sub(r"^np\.\w+\((.*)\)$", r"\1", raw)
             if key == "timing_s/step":
-                times[step] = float(raw)
+                times[step] = _num(raw)
             elif key == VAL_KEY:
-                vals[step] = float(raw)
-    last = max([s for s in vals if s % 10 == 0] or [0])
-    return curve_from_steps(times, vals, last, {}) if times else [
-        dict(step=0, gpu_hours=0.0, reward=vals[0], gpu_hours_estimated=False, reward_source="driver log")
-    ]
+                vals[step] = _num(raw)
+    if 0 not in vals:  # "Initial validation metrics: {...}" is pretty-printed over several lines
+        m = re.search(r"Initial validation metrics: \{'" + re.escape(VAL_KEY) + r"': \"\s*\n[^\n]*?'(np\.float64\([-0-9.e]+\))", text)
+        if m:
+            vals[0] = _num(m.group(1))
+    return times, vals
 
 
-def first_crossing(points: list[dict], threshold: float):
-    """GPU-hours where the curve first reaches ``threshold``, linearly interpolated between validation points."""
-    for a, b in zip(points, points[1:]):
-        if a["reward"] < threshold <= b["reward"]:
-            frac = (threshold - a["reward"]) / (b["reward"] - a["reward"])
-            return dict(gpu_hours=a["gpu_hours"] + frac * (b["gpu_hours"] - a["gpu_hours"]), step_between=[a["step"], b["step"]],
-                        uses_estimated=b["gpu_hours_estimated"])
-    return None
+def training_step_time(times: dict) -> float:
+    """Median step time over non-validation steps, step 1 (warm-up) excluded."""
+    picked = [t for s, t in times.items() if s != 1 and s % 5 and s % 10]
+    return statistics.median(picked or [t for s, t in times.items() if s != 1])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--metrics", type=Path, required=True)
-    parser.add_argument("--arm", action="append", default=[], help="NAME=driver.log for arms run after the archive")
-    parser.add_argument("--thresholds", type=float, nargs=2, default=[11.11, 12.28])
+    parser.add_argument("--metrics", type=Path, required=True, help="metrics.json of the October runs")
+    parser.add_argument("--step-time", action="append", default=[], help="ARM=seconds (B200 median training step time)")
+    parser.add_argument("--curve-log", action="append", default=[], help="ARM=driver.log of a current run (val + timing)")
+    parser.add_argument("--noise", type=float, default=0.0, help="SD of the base validation reward in the current env")
+    parser.add_argument("--relative", action="store_true", help="plot the gain over each arm's own step-0 value")
+    parser.add_argument("--thresholds", type=float, nargs=2, default=[11.11, 12.28], help="raw thresholds (October scale)")
+    parser.add_argument("--caption", type=Path, default=None, help="text file printed under the figure")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    curves = load_archive(args.metrics)
-    for spec in args.arm:
-        name, path = spec.split("=", 1)
-        curves[name] = load_driver_log(Path(path))
-    order = [arm for arm in ARMS if arm in curves]
+    vals, sources, step_time, timing_source = {}, {}, {}, {}
+    data = json.loads(args.metrics.read_text())
+    for run, (arm, recorded) in ARCHIVE.items():
+        steps = {int(s): v for s, v in data[run].items()}
+        vals[arm] = {s: v[VAL_KEY] for s, v in steps.items() if VAL_KEY in v}
+        sources[arm] = {s: "October run, archived log" for s in vals[arm]}
+        for s, v in recorded.items():
+            vals[arm][s] = v
+            sources[arm][s] = "October run, recorded from the run log (not archived)"
+    for spec in args.curve_log:
+        arm, path = spec.rsplit("=", 1)
+        times, v = parse_driver_log(Path(path))
+        vals[arm] = v
+        sources[arm] = {s: "current run (PR head), driver log" for s in v}
+        if times:
+            step_time[arm] = training_step_time(times)
+            timing_source[arm] = f"median of {len(times)} logged steps in the same run"
+    for spec in args.step_time:
+        arm, sec = spec.rsplit("=", 1)
+        step_time[arm] = float(sec)
+        timing_source[arm] = "separate 4-step timing run / bench on 8×B200 (PR head)"
+    order = [a for a in ARMS if a in vals and a in step_time]
+    base_old = vals["OmniNFT (DiffusionNFT)"][0]
+    thresholds = [t - base_old for t in args.thresholds] if args.relative else list(args.thresholds)
 
-    crossings = {arm: {str(t): first_crossing(curves[arm], t) for t in args.thresholds} for arm in order}
+    curves = {}
+    for arm in order:
+        base = vals[arm][0]
+        current = sources[arm][0].startswith("current")
+        curves[arm] = [
+            dict(step=s, gpu_hours=GPUS * s * step_time[arm] / 3600, reward=v, value=v - base if args.relative else v,
+                 noise=args.noise if current else 0.0, source=sources[arm][s])
+            for s, v in sorted(vals[arm].items())
+        ]
+
+    def crossing(points, t):
+        for a, b in zip(points, points[1:]):
+            if a["value"] < t <= b["value"]:
+                f = (t - a["value"]) / (b["value"] - a["value"])
+                return a["gpu_hours"] + f * (b["gpu_hours"] - a["gpu_hours"])
+        return None
+
+    crossings = {a: {str(round(t, 3)): crossing(curves[a], t) for t in thresholds} for a in order}
     speedups = []
-    for t in args.thresholds:
+    for t in thresholds:
+        key = str(round(t, 3))
         for art in (a for a in order if ARMS[a]["art"]):
             for base in (a for a in order if not ARMS[a]["art"]):
-                c_art, c_base = crossings[art][str(t)], crossings[base][str(t)]
-                last_base = curves[base][-1]["gpu_hours"]
-                if c_art is None:
-                    value, text = None, f"{art} does not reach {t} (last point {curves[art][-1]['gpu_hours']:.1f} GPU-h)"
-                elif c_base is None:
-                    value, text = None, f"> {last_base / c_art['gpu_hours']:.2f}x ({base} not reached by {last_base:.1f} GPU-h)"
+                ca, cb = crossings[art][key], crossings[base][key]
+                last_b, last_a = curves[base][-1]["gpu_hours"], curves[art][-1]["gpu_hours"]
+                if ca is None:
+                    value, text = None, f"not reached by {last_a:.0f} GPU-h"
+                elif cb is None:
+                    value, text = None, f"> {last_b / ca:.2f}x ({base} not reached by {last_b:.0f} GPU-h)"
                 else:
-                    value = c_base["gpu_hours"] / c_art["gpu_hours"]
-                    text = f"{value:.2f}x"
+                    value, text = cb / ca, f"{cb / ca:.2f}x"
                 speedups.append(dict(threshold=t, art=art, baseline=base, speedup=value, text=text))
 
     with open(args.out / "reward_vs_gpu_hours.csv", "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["arm", "step", "gpu_hours", "val_reward", "gpu_hours_estimated", "reward_source"])
-        writer.writeheader()
+        w = csv.DictWriter(f, fieldnames=["arm", "step", "gpu_hours", "val_reward", "gain_over_step0", "noise_sd", "source"])
+        w.writeheader()
         for arm in order:
+            base = curves[arm][0]["reward"]
             for p in curves[arm]:
-                writer.writerow(dict(arm=arm, step=p["step"], gpu_hours=round(p["gpu_hours"], 2), val_reward=round(p["reward"], 4),
-                                     gpu_hours_estimated=p["gpu_hours_estimated"], reward_source=p["reward_source"]))
+                w.writerow(dict(arm=arm, step=p["step"], gpu_hours=round(p["gpu_hours"], 2), val_reward=round(p["reward"], 4),
+                                gain_over_step0=round(p["reward"] - base, 4), noise_sd=p["noise"], source=p["source"]))
     (args.out / "reward_vs_gpu_hours.json").write_text(json.dumps(dict(
         definition=dict(
-            gpu_hours="8 x cumulative timing_s/step (validation steps included); steps without an archived time use the "
-                      "run's median step time (validation and non-validation steps separately)",
-            val_reward=f"{VAL_KEY}: mean raw combined reward on the fixed-seed validation prompts",
+            gpu_hours="8 x step x median training-step time on 8xB200 at the PR head (validation steps and step 1 excluded)",
+            val_reward=f"{VAL_KEY}: mean raw combined reward on the 16 fixed-seed validation prompts",
+            y="gain over the arm's own step-0 value" if args.relative else "raw validation reward",
             crossing="first threshold crossing, linearly interpolated between consecutive validation points",
-            speedup="GPU-hours(baseline reaches threshold) / GPU-hours(ART reaches threshold); '> Nx' when the baseline "
-                    "does not reach it within its run (N from its last point)",
+            speedup="GPU-hours(baseline reaches threshold) / GPU-hours(ART reaches threshold)",
         ),
-        thresholds=args.thresholds, curves={a: curves[a] for a in order}, crossings=crossings, speedups=speedups), indent=1))
+        step_time_s=step_time, timing_source=timing_source, base_noise_sd=args.noise, thresholds=thresholds,
+        curves=curves, crossings=crossings, speedups=speedups), indent=1))
 
     plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 10, "axes.edgecolor": INK2, "axes.labelcolor": INK,
                          "xtick.color": INK2, "ytick.color": INK2, "figure.facecolor": SURFACE, "axes.facecolor": SURFACE})
-    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(14, 6.2), gridspec_kw=dict(width_ratios=[1.65, 1]))
-    xmax = 160.0
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(14, 7.4), gridspec_kw=dict(width_ratios=[1.65, 1]))
     for a in (ax, ax2):
         a.grid(True, color=GRID, linewidth=0.8)
         a.set_axisbelow(True)
         for side in ("top", "right"):
             a.spines[side].set_visible(False)
-    for t in args.thresholds:
-        for a in (ax, ax2):
-            a.axhline(t, color=INK2, linewidth=1, linestyle=(0, (5, 4)), zorder=1)
-        ax.text(xmax * 0.995, t + 0.05, f"threshold {t:.2f}", ha="right", va="bottom", fontsize=9, color=INK2)
-
+    xmax = max(curves[a][-1]["gpu_hours"] for a in order if ARMS[a]["art"] or a.startswith("FlowGRPO")) * 1.08
+    for t in thresholds:
+        ax.axhline(t, color=INK2, linewidth=1, linestyle=(0, (5, 4)), zorder=1)
+        ax.text(xmax * 0.995, t, f"threshold {'+' if args.relative else ''}{t:.2f}", ha="right", va="bottom", fontsize=9, color=INK2)
     for arm in order:
         spec, pts = ARMS[arm], curves[arm]
-        for panel, xkey in ((ax, "gpu_hours"), (ax2, "step")):
-            for a_pt, b_pt in zip(pts, pts[1:]):
-                panel.plot([a_pt[xkey], b_pt[xkey]], [a_pt["reward"], b_pt["reward"]], color=spec["color"], linewidth=2,
-                           linestyle=(0, (4, 3)) if b_pt["gpu_hours_estimated"] else "-", zorder=3)
-            for p in pts:
-                hollow = p["gpu_hours_estimated"] or p["reward_source"].startswith("recorded")
-                panel.plot(p[xkey], p["reward"], marker=spec["marker"], markersize=6.5, color=spec["color"],
-                           markerfacecolor=SURFACE if hollow else spec["color"], markeredgewidth=1.8, zorder=4,
-                           linestyle="none")
-        inside = [p for p in pts if p["gpu_hours"] <= xmax]
-        end = inside[-1]
-        missed = [t for t in args.thresholds if spec["art"] and crossings[arm][str(t)] is None]
-        label = arm + "".join(f"\n({t:.2f} not reached by {pts[-1]['gpu_hours']:.0f} GPU-h)" for t in missed)
-        if len(inside) < len(pts):  # runs past the right edge: label above the line, ending at the edge
-            beyond = pts[-1]
-            label += f"\n(continues to {beyond['reward']:.2f} at {beyond['gpu_hours']:.0f} GPU-h, step {beyond['step']})"
-            ax.annotate(label, (end["gpu_hours"], end["reward"]), xytext=(0, 12), textcoords="offset points",
-                        fontsize=9, color=INK, ha="right", va="bottom")
+        shown = [p for p in pts if p["gpu_hours"] <= xmax]
+        for panel, xkey, ykey, data_pts in ((ax, "gpu_hours", "value", shown), (ax2, "step", "reward", pts)):
+            panel.plot([p[xkey] for p in data_pts], [p[ykey] for p in data_pts], color=spec["color"], linewidth=2, zorder=3)
+            panel.errorbar([p[xkey] for p in data_pts], [p[ykey] for p in data_pts], yerr=[p["noise"] for p in data_pts],
+                           fmt=spec["marker"], color=spec["color"], markersize=6.5, elinewidth=1, capsize=0, zorder=4,
+                           markerfacecolor=SURFACE if data_pts and data_pts[0]["noise"] else spec["color"], markeredgewidth=1.8)
+        ax.plot([], [], color=spec["color"], marker=spec["marker"], linewidth=2, label=arm)
+        end = shown[-1]
+        missed = [t for t in thresholds if spec["art"] and crossings[arm][str(round(t, 3))] is None]
+        label = arm.replace("DiffusionART", "ART")
+        if len(missed) == len(thresholds):
+            label += f"\n(neither threshold reached by {pts[-1]['gpu_hours']:.0f} GPU-h)"
+        elif missed:
+            label += "".join(f"\n({'+' if args.relative else ''}{t:.2f} not reached by {pts[-1]['gpu_hours']:.0f} GPU-h)" for t in missed)
+        if len(shown) < len(pts):
+            ax.annotate(label + f"\n(continues to step {pts[-1]['step']}, {pts[-1]['gpu_hours']:.0f} GPU-h)",
+                        (end["gpu_hours"], end["value"]), xytext=(0, 10), textcoords="offset points", fontsize=8.5,
+                        color=INK, ha="right", va="bottom")
         else:
-            ax.annotate(label, (end["gpu_hours"], end["reward"]), xytext=(7, 0), textcoords="offset points",
-                        fontsize=9, color=INK, va="center")
-        ax.plot([], [], color=spec["color"], marker=spec["marker"], linewidth=2, markersize=6.5, label=arm)
-
-    for t in args.thresholds:
-        marks = sorted(
-            ((crossings[sp["art"]][str(t)]["gpu_hours"], i, sp) for i, sp in enumerate(speedups)
-             if sp["threshold"] == t and crossings[sp["art"]][str(t)] is not None and sp["baseline"].startswith("OmniNFT")),
-            key=lambda m: m[0],
-        )
-        for j, (x, _, sp) in enumerate(marks):
-            ax.plot([x, x], [8.9, t], color=ARMS[sp["art"]]["color"], linewidth=1, linestyle=":", zorder=2)
-            ax.plot(x, t, marker="|", markersize=12, color=ARMS[sp["art"]]["color"], zorder=5)
-            crowded = j + 1 < len(marks) and marks[j + 1][0] - x < 12
-            ax.annotate(sp["text"].replace("x", "×"), (x, 8.9), xytext=(-4 if crowded else 4, 5), textcoords="offset points",
-                        fontsize=9.5, color=INK, ha="right" if crowded else "left", va="bottom")
-    for arm in (a for a in order if not ARMS[a]["art"]):
-        for t in args.thresholds:
-            c = crossings[arm][str(t)]
-            if c is not None:
-                ax.plot(c["gpu_hours"], t, marker="|", markersize=12, color=ARMS[arm]["color"], zorder=5)
-
+            ax.annotate(label, (end["gpu_hours"], end["value"]), xytext=(6, 0), textcoords="offset points", fontsize=8.5,
+                        color=INK, va="center")
+    shown_vals = [p["value"] for a in order for p in curves[a] if p["gpu_hours"] <= xmax]
+    ybot, ytop = min(shown_vals + [min(thresholds)]) - 0.45, max(shown_vals + [max(thresholds)]) + 0.5
+    ax.set_ylim(ybot, ytop)
+    blocks = []
+    for t in thresholds:
+        key = str(round(t, 3))
+        for arm in (a for a in order if not ARMS[a]["art"]):
+            c = crossings[arm][key]
+            if c is not None and c <= xmax:
+                ax.plot(c, t, marker="|", markersize=12, color=ARMS[arm]["color"], zorder=5)
+        marks = sorted((crossings[a][key], a) for a in order if ARMS[a]["art"] and crossings[a][key] is not None)
+        lines = []
+        for c, art in marks:
+            if c > xmax:
+                continue
+            ax.plot([c, c], [ybot, t], color=ARMS[art]["color"], linewidth=1, linestyle=":", zorder=2)
+            ax.plot(c, t, marker="|", markersize=12, color=ARMS[art]["color"], zorder=5)
+            parts = [f"{sp['text'].replace('x', '×', 1)} vs {sp['baseline'].split(' ')[0]}" for sp in speedups
+                     if sp["threshold"] == t and sp["art"] == art and sp["speedup"] is not None]
+            if parts:
+                lines.append(f"{art.replace('DiffusionART', 'ART')}: " + ", ".join(parts))
+        blocks.append(f"Speedup to {'+' if args.relative else ''}{t:.2f}:\n" + ("\n".join(lines) if lines else "no ART arm reached it"))
     ax.set_xlim(0, xmax)
-    ax.set_ylim(8.9, 14.3)
-    ax.set_xlabel("cumulative GPU-hours (8 × cumulative step time, B200)")
-    ax.set_ylabel("validation reward (mean raw combined reward)")
+    ax.set_xlabel("GPU-hours (8 × step × median training-step time on 8×B200, PR head)")
+    ax.set_ylabel("validation reward gain over step 0" if args.relative else "validation reward")
     ax.set_title("Validation reward vs compute (primary)", loc="left", fontsize=12, color=INK)
     ax.legend(loc="upper left", frameon=False, fontsize=9)
     ax2.set_xlabel("training step")
-    ax2.set_title("Validation reward vs step (secondary)", loc="left", fontsize=12, color=INK)
-    ax2.set_ylim(8.9, max(p["reward"] for a in order for p in curves[a]) + 0.3)
-    caption = (
-        "LTX-2.3 T2AV, identical prompts, seeds, rewards, routing, LoRA r32, lr and sampler; one 8×B200 node per arm; validation every 10 steps "
-        "(step 0 = base model, 9.10 for all arms). Solid / filled: step times and validation rewards from the archived logs. Dashed / hollow: "
-        "GPU-hours estimated from the run's median step time (DiffusionART K=8 after step 26, K=2 after step 45) and validation rewards recorded "
-        "from the run logs but not archived (K=8 steps 30–50, K=2 step 50). Crossings are linear interpolations between validation points; "
-        "dotted drop lines mark DiffusionART's first crossing, labelled with the speedup vs OmniNFT = GPU-hours(OmniNFT reaches threshold) / "
-        "GPU-hours(ART reaches threshold); orange ticks mark OmniNFT's crossings. The left panel is cut at 160 GPU-h; the right panel shows OmniNFT "
-        "to step 150. FlowGRPO and DiffusionART-Flash curves: runs in progress."
-    )
-    fig.text(0.01, 0.01, caption, fontsize=8.2, color=INK2, wrap=True, va="bottom")
-    fig.tight_layout(rect=(0, 0.11, 1, 1))
+    ax2.set_ylabel("validation reward (raw)")
+    ax2.set_title("Raw validation reward vs step (secondary)", loc="left", fontsize=12, color=INK)
+    caption_h = 0.12 if args.caption else 0.0
+    for i, block in enumerate(blocks):
+        fig.text(0.04 + 0.31 * i, caption_h + 0.015, block, fontsize=8.6, color=INK, va="bottom", ha="left")
+    if args.caption:
+        fig.text(0.01, 0.01, Path(args.caption).read_text().strip(), fontsize=8.2, color=INK2, wrap=True, va="bottom")
+    fig.tight_layout(rect=(0, caption_h + (0.1 if blocks else 0.02), 1, 1))
     fig.savefig(args.out / "reward_vs_gpu_hours.png", dpi=160)
-    print(json.dumps(speedups, indent=1))
+    print(json.dumps(dict(step_time_s=step_time, speedups=speedups), indent=1))
 
 
 if __name__ == "__main__":
